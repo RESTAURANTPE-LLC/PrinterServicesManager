@@ -1,4 +1,4 @@
-using SQLite;
+using PSQLite;
 
 namespace PrinterServices.Data.Models
 {

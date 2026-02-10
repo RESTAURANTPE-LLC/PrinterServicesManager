@@ -47,6 +47,44 @@ Causas raíz identificadas:
 | Logging | **log4net** | Consistente con ecosistema existente |
 | Despliegue | **Central (1 en la red)** | Un solo servicio gestiona todas las impresoras |
 
+### Decisión crítica: SQLite autónomo — sin instancia de QuipuNetX.dll
+
+> **PrinterServices NO ejecuta ninguna instancia de QuipuNetX.dll.**
+> No existe `local_id`, no existe contexto de seguridad, no existe `SugarDb.getInstance()`,
+> no existe ningún singleton ni servicio de QuipuNetX corriendo dentro de este proceso.
+
+**Lo que SÍ se reutiliza** (solo como clases/estructuras de datos deserializadas desde JSON):
+- `Impresion` — objeto de impresión recibido vía HTTP
+- `Impresora` — configuración de impresora
+- `Respuesta` — resultado de operaciones
+- `Linea` — estructura de línea de impresión (formato estructurado)
+- `Definitions` — constantes
+
+**Lo que NO se reutiliza** (es código propio de PrinterServices):
+- `Data/Orm/PSQLite.cs` — ORM sqlite-net limpio, namespace `PSQLite`, CERO refs a QuipuNetX
+- `PrinterServiceDb` — hereda `PSQLite.SQLiteConnection`, BD propia (`printerservice.db`)
+- Todas las entities usan `using PSQLite;` (NUNCA `using SQLite;`)
+- Esta es la **única duplicación de código aceptable** en todo el proyecto
+
+```
+QuipuNetX.dll (referencia)            PrinterServices.exe (autónomo)
+─────────────────────────             ─────────────────────────────
+namespace SQLite (acoplado)           namespace PSQLite (limpio)
+  ├── Util.Capture, Logquipu           ├── Sin deps de QuipuNetX
+  ├── FeatureFlagConfigReader           ├── PRAGMAs hardcoded sensatos
+  ├── SQLiteQueryMonitor                ├── P/Invoke directo a sqlite3.dll
+  └── Security.LocalIdActual            └── Solo ORM puro
+
+SugarDb → quipunet.db                 PrinterServiceDb → printerservice.db
+  ├── local_id, security               ├── NO local_id, NO security
+  ├── tablas de negocio                 ├── print_jobs, printers, config_settings
+  └── instancia global                  └── instancia propia, independiente
+
+Solo se reutilizan CLASES como DTOs:
+  Impresion, Impresora, Respuesta, Linea, Definitions
+  (deserializadas desde JSON, no instanciadas desde la DLL)
+```
+
 ---
 
 ## 4. Diagrama de Arquitectura del Sistema

@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 using log4net;
-using SQLite;
+using PSQLite;
 
 namespace PrinterServices.Data
 {

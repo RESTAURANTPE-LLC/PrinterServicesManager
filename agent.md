@@ -57,6 +57,25 @@ PrinterServices.exe → imprime → notifica vía gRPC → Servidor + Cliente
 7. **log4net** para logging
 8. **TopShelf** para Windows Service
 
+### SQLite autónomo — NO hay instancia de QuipuNetX.dll
+
+> **PrinterServices NO ejecuta QuipuNetX.dll.** No hay `local_id`, no hay
+> contexto de seguridad, no hay `SugarDb.getInstance()`, no hay ningún
+> singleton ni servicio de QuipuNetX corriendo en este proceso.
+
+- **Solo se reutilizan clases como DTOs** (deserializadas desde JSON):
+  `Impresion`, `Impresora`, `Respuesta`, `Linea`, `Definitions`
+- **Namespace `PSQLite`** — ORM sqlite-net propio en `Data/Orm/PSQLite.cs`
+  - Copia limpia de sqlite-net (MIT License) sin NINGUNA referencia a QuipuNetX
+  - Namespace diferente (`PSQLite`) para evitar conflictos con `SQLite` de QuipuNetX.dll
+  - P/Invoke directo a `sqlite3.dll` — NO pasa por QuipuNetX
+  - Sin `Util.Capture`, sin `Logquipu`, sin `FeatureFlagConfigReader`, sin `Security`
+  - Todas las entities usan `using PSQLite;` (NO `using SQLite;`)
+- **PrinterServiceDb hereda `PSQLite.SQLiteConnection`** — 100% autónomo
+- Esta es la **única duplicación de código aceptable** en el proyecto
+- **NUNCA** usar `using SQLite;` — siempre `using PSQLite;`
+- **NUNCA** intentar usar `SugarDb.getInstance()` ni asumir contexto QuipuNetX
+
 ---
 
 ## Estructura de carpetas (ACTUAL — archivos implementados)
@@ -143,9 +162,16 @@ printerservices/
     │
     └── Data/                          # ── PERSISTENCIA SQLITE ──
         │                              # BD: %AppData%\QuipuNet\printerservice.db
-        ├── PrinterServiceDb.cs       # Singleton, hereda SQLiteConnection (patrón SugarDb)
+        ├── Orm/
+        │   └── PSQLite.cs            # ★ ORM sqlite-net LIMPIO (namespace PSQLite)
+        │                              # CERO dependencias de QuipuNetX.dll
+        │                              # P/Invoke directo a sqlite3.dll
+        │                              # Incluye: SQLiteConnection, TableMapping,
+        │                              #   SQLiteCommand, TableQuery<T>, atributos,
+        │                              #   SQLite3 P/Invoke — todo autónomo
+        ├── PrinterServiceDb.cs       # Singleton, hereda PSQLite.SQLiteConnection
         │                              # CreateTables() al inicializar (6 tablas + índices)
-        └── Models/
+        └── Models/                    # Todos usan: using PSQLite;
             ├── PrintJobEntity.cs      # print_jobs — incluye lineas_imprimir_json, tamanio_letra, etc.
             ├── PrintLogEntity.cs      # print_log
             ├── PrinterEntity.cs       # printers — incluye mac_address, estado_online, tiene_papel

@@ -80,6 +80,7 @@
     <Compile Include="Monitoring\StatusMonitor.cs" />
     <Compile Include="Config\ConfigManager.cs" />
     <Compile Include="Api\Controllers\ConfigController.cs" />
+    <Compile Include="Data\Orm\PSQLite.cs" />
     <Compile Include="Data\PrinterServiceDb.cs" />
     <Compile Include="Data\Models\ConfigSettingEntity.cs" />
     <Compile Include="Data\Models\PrintJobEntity.cs" />
