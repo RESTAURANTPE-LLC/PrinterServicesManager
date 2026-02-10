@@ -109,6 +109,30 @@ namespace PrinterServices.Queue
             Log.WarnFormat("[QUEUE] Job {0} FALLIDO → {1}", job.JobId, error);
         }
 
+        public void MarkWaiting(PrintJob job, string reason)
+        {
+            job.Estado = PrintJobStatus.Waiting;
+            job.ErrorMensaje = reason;
+            UpdateJobInDb(job);
+
+            Log.InfoFormat("[QUEUE] Job {0} en ESPERA → {1}", job.JobId, reason);
+        }
+
+        public void ReEnqueue(PrintJob job)
+        {
+            if (job == null) return;
+
+            job.Estado = PrintJobStatus.Pending;
+            job.ErrorMensaje = null;
+            UpdateJobInDb(job);
+
+            _queue.Enqueue(job);
+            _signal.Release();
+
+            Log.InfoFormat("[QUEUE] Job {0} re-encolado desde WAITING → impresora={1}",
+                job.JobId, job.ImpresoraNombre ?? job.ImpresoraId);
+        }
+
         public void RecoverPending()
         {
             try

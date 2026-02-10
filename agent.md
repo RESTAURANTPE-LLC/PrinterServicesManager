@@ -59,7 +59,7 @@ PrinterServices.exe → imprime → notifica vía gRPC → Servidor + Cliente
 
 ---
 
-## Estructura de carpetas y qué hace cada una
+## Estructura de carpetas (ACTUAL — archivos implementados)
 
 ```
 printerservices/
@@ -73,84 +73,201 @@ printerservices/
     │
     ├── PrinterServices.csproj         # Proyecto único. Incluye TODOS los archivos.
     ├── packages.config                # TopShelf, log4net, Newtonsoft.Json
-    ├── App.config                     # Puertos HTTP/gRPC/UDP, timeouts, config
+    ├── App.config                     # Solo binding redirects (Newtonsoft.Json v12→v13)
     ├── log4net.config                 # Logging a archivo + consola
     ├── Program.cs                     # Bootstrap TopShelf + log4net
     ├── PrinterServicesHost.cs         # Start() / Stop() — orquesta todo.
-    │                                  # Cada worker en su propio Task(LongRunning).
+    │                                  # Inicializa: DB → ConfigManager → Queue → Worker
+    │                                  #             → HTTP API → StatusMonitor
+    │
+    ├── Config/                        # ── CONFIGURACIÓN CENTRALIZADA ──
+    │   └── ConfigManager.cs           # ★ Singleton, SQLite-backed, cache ConcurrentDict
+    │                                  # Reemplaza ConfigurationManager.AppSettings
+    │                                  # Todos los timeouts/puertos vienen de aquí
+    │                                  # API: GetInt(), GetBool(), Set(), SetInt()
     │
     ├── Api/                           # ── HTTP API (self-hosted) ──
-    │   │                              # System.Net.HttpListener
-    │   ├── HttpApiServer.cs           # Escucha HTTP, despacha a controllers
-    │   ├── ApiRouter.cs               # Mapeo de rutas → handlers
+    │   │                              # System.Net.HttpListener, puerto desde ConfigManager
+    │   ├── HttpApiServer.cs           # Escucha HTTP, despacha a ApiRouter
+    │   ├── ApiRouter.cs               # Mapeo rutas → handlers + ApiResult helper
     │   └── Controllers/
     │       ├── HealthController.cs    # GET /api/health
-    │       ├── PrintController.cs     # POST /api/print/comanda, /comandas, /venta
+    │       ├── PrintController.cs     # POST /api/print/comanda, /comandas, /venta, /precuenta
     │       ├── PrinterController.cs   # GET /api/printer/status, POST /api/printer/register
-    │       ├── JobController.cs       # GET /api/job/{id}, /jobs/pending
-    │       ├── NotificationController.cs  # GET /api/notifications/{deviceId}
-    │       └── NetworkController.cs   # GET /api/network/status
+    │       ├── JobController.cs       # GET /api/job/{id}, /jobs/pending, POST retry
+    │       └── ConfigController.cs    # GET/PUT /api/config — CRUD settings dinámico
+    │                                  # (NotificationController.cs, NetworkController.cs → futuro)
     │
     ├── Queue/                         # ── COLA DE IMPRESIÓN (GestorDeColas) ──
     │   ├── PrintJobManager.cs         # ConcurrentQueue + SemaphoreSlim + SQLite backup
-    │   └── PrintJob.cs               # Wrappea Impresion + jobId, estado, reintentos
+    │   │                              # Enqueue, DequeueAsync, MarkDone, MarkFailed,
+    │   │                              # MarkWaiting, ReEnqueue, RecoverPending
+    │   └── PrintJob.cs               # Estado: PENDING→PRINTING→DONE|FAILED|WAITING
+    │                                  # Props: LineasImprimirJson, TamanioLetra, AbreGaveta,
+    │                                  #        TipoGeneracion, QrData, CodigoCorte
     │
-    ├── Workers/                       # ── THREADS DE BACKGROUND ──
-    │   ├── PrintWorker.cs            # Consume cola, imprime, retry, notifica
-    │   └── StatusMonitor.cs          # Timer 15s: DLE EOT a cada impresora
+    ├── Workers/                       # ── THREAD DE IMPRESIÓN ──
+    │   └── PrintWorker.cs            # 1. Pre-check DLE EOT (offline→WAITING, sin papel→WAITING)
+    │                                  # 2. BuildPayload: modo LINEAS o modo CADENA
+    │                                  # 3. SendWithRetry: exponential backoff desde ConfigManager
+    │                                  # 4. LogPrint en print_log
+    │
+    ├── Monitoring/                    # ── MONITOREO DE IMPRESORAS ──
+    │   ├── PrinterStatusChecker.cs   # DLE EOT 1-4 via raw TCP Socket
+    │   │                              # CheckAsync(ip, port, timeout) → PrinterStatus
+    │   │                              # CheckSync(ip, port, timeout) → PrinterStatus
+    │   │                              # Retorna: Online, TienePapel, TapaAbierta, ErrorRecuperable
+    │   └── StatusMonitor.cs          # Background loop (cada StatusCheckIntervalSeconds)
+    │                                  # Chequea todas las printers registradas
+    │                                  # Actualiza printers table (estado_online, tiene_papel, etc.)
+    │                                  # Cuando printer pasa OFFLINE→ONLINE: re-encola jobs WAITING
     │
     ├── Drivers/                       # ── DRIVERS ESC/POS POR MODELO ──
-    │   ├── IPrinterDriver.cs         # Interfaz: corte, status, texto, QR, etc.
+    │   ├── IPrinterDriver.cs         # Interfaz: corte, status, texto, init, feed, cashDrawer
     │   ├── DriverFactory.cs          # Selecciona driver por Impresion.Printermodel
-    │   ├── EpsonDriver.cs            # Corte: 0x1D 0x56 0x01 | Status: DLE EOT
-    │   ├── StarDriver.cs             # Corte: 0x1B 0x64 0x02 | Status: ASB
-    │   ├── BixolonDriver.cs          # Corte: 0x1D 0x56 0x42 | Status: DLE EOT
-    │   └── GenericEscPosDriver.cs    # Corte: 0x1D 0x56 0x42 0x00 | Status: DLE EOT
+    │   ├── EpsonDriver.cs            # Corte: GS V 1    | Status: DLE EOT
+    │   ├── StarDriver.cs             # Corte: ESC d 2   | Status: ASB
+    │   ├── BixolonDriver.cs          # Corte: GS V 66 0 | Status: DLE EOT
+    │   ├── GenericEscPosDriver.cs    # Corte: GS V 66 0 | Status: DLE EOT
+    │   ├── EscPosCommandBuilder.cs   # ★ Fluent builder de bytes ESC/POS
+    │   │                              # Init, Text, Bold, Alignment, FontSize, LetterSize,
+    │   │                              # QR code, Barcode, CashDrawer, Cut, LineSpacing
+    │   └── LineaParser.cs            # Parsea lineasimprimir JSON (formato Linea de QuipuNetX)
+    │                                  # LineaData: texto, estilo(BOLD/CENTER/RIGHT), tamanio, barcode
+    │                                  # BuildFromLineas(driver, lineas) → byte[] ESC/POS completo
     │
     ├── Transport/                     # ── CAPA DE TRANSPORTE FÍSICO ──
-    │   ├── ITransport.cs             # Interfaz: Connect, Send, Receive, Dispose
-    │   ├── TcpTransport.cs           # TCP:9100, retry 3x, timeout, pool
-    │   └── SerialTransport.cs        # Puerto COM
-    │
-    ├── Notifications/
-    │   └── NotificationManager.cs    # gRPC push → Servidor + Cliente
-    │
-    ├── Grpc/
-    │   ├── Protos/
-    │   │   └── printer_service.proto
-    │   └── Services/
-    │       └── PrinterGrpcService.cs
-    │
-    ├── Network/                       # ── DETECCIÓN DE RED (PROCESO PARALELO) ──
-    │   │                              # ★ Thread dedicado, NO toca la cola
-    │   │                              # ★ Todo fuertemente tipado
-    │   ├── NetworkWatcher.cs          # Loop paralelo: gateway MAC + ARP scan
-    │   ├── ArpHelper.cs              # P/Invoke: SendARP, GetIpNetTable
-    │   ├── NetworkTypes.cs           # Enums + structs inmutables (MacAddress, etc.)
-    │   └── NetworkAlertManager.cs    # Publica alertas → NotificationManager
-    │
-    ├── Discovery/
-    │   └── UdpDiscoveryServer.cs     # Broadcast UDP :9999
-    │
-    ├── Status/
-    │   ├── PrinterStatusChecker.cs   # DLE EOT / ASB
-    │   └── PrinterStatusCache.cs     # ConcurrentDictionary thread-safe
+    │   ├── ITransport.cs             # Interfaz: ConnectAsync, SendAsync, ReceiveAsync, Dispose
+    │   └── TcpTransport.cs           # TCP:9100, timeouts desde ConfigManager
+    │                                  # (SerialTransport.cs, UsbTransport.cs → futuro)
     │
     └── Data/                          # ── PERSISTENCIA SQLITE ──
         │                              # BD: %AppData%\QuipuNet\printerservice.db
-        ├── PrinterServiceDb.cs       # Hereda SQLiteConnection (patrón SugarDb)
-        ├── Models/
-        │   ├── PrintJobEntity.cs
-        │   ├── PrintLogEntity.cs
-        │   ├── PrinterEntity.cs      # Incluye mac_address
-        │   ├── NotificationEntity.cs
-        │   └── NetworkConfigEntity.cs
-        └── Repositories/
-            ├── PrintJobRepository.cs
-            ├── PrintLogRepository.cs
-            ├── PrinterRepository.cs
-            ├── NotificationRepository.cs
-            └── NetworkConfigRepository.cs
+        ├── PrinterServiceDb.cs       # Singleton, hereda SQLiteConnection (patrón SugarDb)
+        │                              # CreateTables() al inicializar (6 tablas + índices)
+        └── Models/
+            ├── PrintJobEntity.cs      # print_jobs — incluye lineas_imprimir_json, tamanio_letra, etc.
+            ├── PrintLogEntity.cs      # print_log
+            ├── PrinterEntity.cs       # printers — incluye mac_address, estado_online, tiene_papel
+            ├── ConfigSettingEntity.cs  # ★ config_settings — key/value/default/category/tipo/rango
+            ├── NotificationEntity.cs  # notifications
+            └── NetworkConfigEntity.cs # network_config
+```
+
+---
+
+## Componentes implementados y su uso
+
+### ConfigManager — Configuración centralizada
+
+Reemplaza `ConfigurationManager.AppSettings`. Toda configuración dinámica vive en SQLite.
+
+```csharp
+// Inicialización (en PrinterServicesHost.Start())
+var db = PrinterServiceDb.GetInstance();
+var config = ConfigManager.GetInstance(db);  // singleton, seed defaults, carga cache
+
+// Lectura dinámica (en cualquier componente, sin inyección)
+var cfg = ConfigManager.Instance;
+int timeout = cfg.GetInt("TcpConnectTimeoutMs", 3000);   // default si no existe
+bool flag = cfg.GetBool("AutoLearnGatewayOnFirstRun", true);
+
+// Escritura (actualiza cache + BD atómicamente)
+cfg.SetInt("MaxRetries", 5);
+cfg.Set("TcpConnectTimeoutMs", "5000");
+```
+
+### PrintWorker — Flujo de procesamiento de un job
+
+```
+DequeueAsync() → PrinterStatusChecker.CheckAsync(ip, port, timeout)
+  ├─ OFFLINE → MarkWaiting("Impresora offline") → sale, NO retry
+  ├─ SIN PAPEL → MarkWaiting("Sin papel") → sale, NO retry
+  └─ ONLINE + PAPEL → continúa:
+      DriverFactory.GetDriver(model) → BuildPayload(driver, job)
+        ├─ job.LineasImprimirJson != null → LineaParser.BuildFromLineas(driver, lineas)
+        └─ solo cadena → EscPosCommandBuilder: init + letterSize + text + cashDrawer + cut
+      SendWithRetry(payload) → exponential backoff (500ms, 1s, 2s)
+        ├─ Éxito → MarkDone()
+        └─ Falla 3x → MarkFailed(error)
+```
+
+### EscPosCommandBuilder — Ejemplo de uso
+
+```csharp
+var driver = DriverFactory.GetDriver("EPSON_TM_T20II");
+var builder = new EscPosCommandBuilder(driver);
+
+byte[] payload = builder
+    .Init()
+    .SetAlignment(Alignment.Center)
+    .SetBold(true)
+    .Text("*** COCINA ***\n")
+    .SetBold(false)
+    .SetAlignment(Alignment.Left)
+    .SetLetterSize("2")
+    .Text("Mesa 5\n1x Lomo Saltado\n")
+    .OpenCashDrawer()
+    .Cut(CutType.Partial)
+    .Build();
+```
+
+### StatusMonitor — Flujo de monitoreo
+
+```
+Cada N segundos (StatusCheckIntervalSeconds, default 15):
+  → Query printers WHERE ip IS NOT NULL
+  → Para cada impresora:
+      PrinterStatusChecker.CheckAsync(ip, port, timeout)
+        DLE EOT 1 → online/offline
+        DLE EOT 2 → tapa abierta
+        DLE EOT 3 → errores
+        DLE EOT 4 → papel
+      → UPDATE printers SET estado_online, tiene_papel, tapa_abierta, ultimo_check
+      → Si cambio OFFLINE→ONLINE:
+          → Query print_jobs WHERE impresora_id=X AND estado='WAITING'
+          → ReEnqueue() cada uno → vuelven a la cola del worker
+```
+
+### API REST — Ejemplos completos con curl
+
+```bash
+# ── Health ──
+curl http://localhost:8090/api/health
+
+# ── Registrar impresora ──
+curl -X POST http://localhost:8090/api/printer/register \
+  -d '{"impresora_id":"cocina-01","nombre":"Cocina","ip":"10.0.0.50","printermodel":"EPSON_TM_T20II"}'
+
+# ── Enviar comanda simple (modo CADENA) ──
+curl -X POST http://localhost:8090/api/print/comanda \
+  -d '{"impresora_id":"cocina-01","impresora_ip":"10.0.0.50","printermodel":"EPSON_TM_T20II","cadena":"*** COCINA ***\nMesa 5\n1x Lomo Saltado\n","impresora_tamanioletra":"2","abregaveta":"1"}'
+
+# ── Enviar comanda estructurada (modo LINEAS) ──
+curl -X POST http://localhost:8090/api/print/comanda \
+  -d '{"impresora_id":"cocina-01","impresora_ip":"10.0.0.50","printermodel":"EPSON_TM_T20II","lineasimprimir":[{"texto":"COCINA","estilo":"BOLD,CENTER","tamanio":2},{"texto":"Mesa 5","estilo":"","tamanio":1},{"texto":"1x Lomo Saltado","estilo":"BOLD","tamanio":1}]}'
+
+# ── Consultar estado de jobs ──
+curl http://localhost:8090/api/jobs/pending
+curl http://localhost:8090/api/job/abc123def456
+
+# ── Reintentar job fallido ──
+curl -X POST http://localhost:8090/api/job/abc123def456/retry
+
+# ── Estado de impresoras ──
+curl http://localhost:8090/api/printer/status
+curl http://localhost:8090/api/printer/status/cocina-01
+
+# ── Configuración dinámica ──
+curl http://localhost:8090/api/config                    # ver todos
+curl http://localhost:8090/api/config/category/network   # por categoría
+curl http://localhost:8090/api/config/MaxRetries          # uno específico
+curl -X PUT http://localhost:8090/api/config \
+  -d '{"key":"TcpConnectTimeoutMs","value":"5000"}'      # actualizar
+curl -X PUT http://localhost:8090/api/config/batch \
+  -d '{"settings":{"MaxRetries":"5","RetryBackoffBaseMs":"1000"}}'  # batch
+curl -X POST http://localhost:8090/api/config/MaxRetries/reset     # reset uno
+curl -X POST http://localhost:8090/api/config/reset-all            # reset todos
 ```
 
 ---
@@ -160,18 +277,21 @@ printerservices/
 ### DO (Hacer)
 
 - Seguir la arquitectura de 3 capas: **PrintJobManager → IPrinterDriver → ITransport**
+- Usar `ConfigManager.Instance` para toda configuración dinámica (nunca `ConfigurationManager.AppSettings`)
 - Usar `async/await` donde sea posible
 - Usar `Impresion`, `Impresora`, `Respuesta` de QuipuNetX.dll (NO redefinirlos)
 - Seguir el patrón de SugarDb para SQLite
 - Logging con `log4net`: `private static readonly ILog Log = LogManager.GetLogger(typeof(MiClase));`
-- Capturar excepciones, loguear, y devolver `Respuesta` con tipo ERROR
+- Capturar excepciones, loguear, y devolver `ApiResult` o `Respuesta` con tipo ERROR
 - Serializar con `Newtonsoft.Json` (JsonConvert)
-- **Tipado fuerte siempre**: usar enums, no strings mágicos. Clases inmutables para value objects
-- **NetworkWatcher es proceso paralelo**: nunca encolar, nunca tocar PrintJobManager desde ahí
+- **Tipado fuerte siempre**: usar enums, no strings mágicos
+- **NetworkWatcher es proceso paralelo** (futuro): nunca encolar, nunca tocar PrintJobManager
+- **Agregar nuevos .cs al .csproj** en `<Compile>` ItemGroup
 
 ### DON'T (No hacer)
 
 - NO usar APIs de .NET Core / .NET 5+ (no disponibles en 4.5.2)
+- NO usar `ConfigurationManager.AppSettings` — usar `ConfigManager.Instance`
 - NO copiar clases de QuipuNetX al proyecto — referenciar el DLL
 - NO hacer que los Clientes envíen directamente a PrinterServices — solo el Servidor
 - NO usar System.Text.Json — usar Newtonsoft.Json
@@ -179,7 +299,7 @@ printerservices/
 - NO crear archivos fuera de la estructura definida
 - NO modificar QuipuNetX.dll desde este proyecto
 - NO mezclar lógica de red (NetworkWatcher) con lógica de impresión (PrintWorker)
-- NO usar strings para estados/tipos — usar los enums definidos en NetworkTypes.cs
+- NO hardcodear timeouts o puertos — siempre leer de ConfigManager
 
 ### Mapeo de modelos de impresora (IPrinterDriver)
 
@@ -200,6 +320,21 @@ ZKT_ECO               → GenericEscPosDriver
 default               → GenericEscPosDriver
 ```
 
+### Fases del proyecto
+
+| Fase | Estado |
+|------|--------|
+| **0** TopShelf + SQLite + health check | ✅ DONE |
+| **1** HTTP API + PrintJobManager + PrintWorker | ✅ DONE |
+| **2** EscPosCommandBuilder + LineaParser + formatting | ✅ DONE |
+| **3** StatusMonitor (DLE EOT) + WAITING state | ✅ DONE |
+| **C** ConfigManager centralizado (SQLite + API REST) | ✅ DONE |
+| **4** Cola persistente SQLite completa | ✅ DONE |
+| **5** gRPC NotificationManager | PENDIENTE |
+| **6** UDP Discovery | PENDIENTE |
+| **7** Feature flag en PrintUtil del Servidor | PENDIENTE |
+| **8** NetworkWatcher + alertas UI + MonitoreoRemoto | PENDIENTE |
+
 ### Documentos de referencia
 
 - `vibe_engeneering_printerservices.md` — Diseño completo, API, esquema BD, flujos
@@ -207,3 +342,4 @@ default               → GenericEscPosDriver
 - `quipu/QuipuNetX/sugar/Com/Orm/SugarDb.cs` — Patrón para SQLite
 - `quipu/QuipuNetX/SQLite/FeatureFlagConfigReader.cs` — Feature flags y PRAGMAs
 - `quipu/QuipuNetX/entity/extras/Impresion.cs` — Objeto Impresion (~2600 líneas)
+- `quipu/QuipuNetX/entity/extras/Linea.cs` — Estructura de línea para formato estructurado

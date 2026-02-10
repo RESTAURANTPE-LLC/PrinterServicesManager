@@ -1,8 +1,9 @@
 using System;
-using System.Configuration;
 using log4net;
 using PrinterServices.Api;
+using PrinterServices.Config;
 using PrinterServices.Data;
+using PrinterServices.Monitoring;
 using PrinterServices.Queue;
 using PrinterServices.Workers;
 
@@ -14,8 +15,10 @@ namespace PrinterServices
 
         private HttpApiServer _httpApiServer;
         private PrinterServiceDb _db;
+        private ConfigManager _configManager;
         private PrintJobManager _jobManager;
         private PrintWorker _printWorker;
+        private StatusMonitor _statusMonitor;
 
         public void Start()
         {
@@ -29,23 +32,30 @@ namespace PrinterServices
                 _db = PrinterServiceDb.GetInstance();
                 Log.Info("[DB] Base de datos inicializada: " + _db.DatabasePath);
 
-                // 2. Inicializar cola de impresión
+                // 2. Inicializar ConfigManager (centralizado, BD-backed)
+                _configManager = ConfigManager.GetInstance(_db);
+                Log.Info("[CONFIG] Configuración centralizada cargada");
+
+                // 3. Inicializar cola de impresión
                 _jobManager = new PrintJobManager(_db);
                 _jobManager.RecoverPending();
                 Log.Info("[QUEUE] Cola de impresión inicializada");
 
-                // 3. Inicializar worker de impresión
+                // 4. Inicializar worker de impresión
                 _printWorker = new PrintWorker(_jobManager, _db);
                 _printWorker.Start();
                 Log.Info("[WORKER] Worker de impresión iniciado");
 
-                // 4. Inicializar HTTP API
-                int httpPort = GetConfigInt("HttpPort", 8090);
-                _httpApiServer = new HttpApiServer(httpPort, _db, _jobManager);
+                // 5. Inicializar HTTP API
+                int httpPort = _configManager.GetInt("HttpPort", 8090);
+                _httpApiServer = new HttpApiServer(httpPort, _db, _jobManager, _configManager);
                 _httpApiServer.Start();
                 Log.InfoFormat("[HTTP] Servidor escuchando en puerto {0}", httpPort);
 
-                // TODO Fase 3: StatusMonitor
+                // 6. Inicializar StatusMonitor (DLE EOT)
+                _statusMonitor = new StatusMonitor(_db, _jobManager);
+                _statusMonitor.Start();
+
                 // TODO Fase 5: gRPC NotificationManager
                 // TODO Fase 6: UdpDiscoveryServer
                 // TODO Fase 8: NetworkWatcher (proceso paralelo)
@@ -54,6 +64,7 @@ namespace PrinterServices
                 Log.Info("  PrinterServices — Listo");
                 Log.InfoFormat("  HTTP: http://localhost:{0}/api/health", httpPort);
                 Log.InfoFormat("  POST: http://localhost:{0}/api/print/comanda", httpPort);
+                Log.InfoFormat("  GET:  http://localhost:{0}/api/config", httpPort);
                 Log.Info("═══════════════════════════════════════════════");
             }
             catch (Exception ex)
@@ -81,6 +92,12 @@ namespace PrinterServices
                     Log.Info("[WORKER] Worker detenido");
                 }
 
+                if (_statusMonitor != null)
+                {
+                    _statusMonitor.Stop();
+                    Log.Info("[MONITOR] StatusMonitor detenido");
+                }
+
                 if (_db != null)
                 {
                     _db.Close();
@@ -93,17 +110,6 @@ namespace PrinterServices
             }
 
             Log.Info("PrinterServices — Detenido.");
-        }
-
-        private static int GetConfigInt(string key, int defaultValue)
-        {
-            string value = ConfigurationManager.AppSettings[key];
-            int result;
-            if (!string.IsNullOrEmpty(value) && int.TryParse(value, out result))
-            {
-                return result;
-            }
-            return defaultValue;
         }
     }
 }

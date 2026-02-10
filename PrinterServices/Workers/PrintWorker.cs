@@ -1,10 +1,9 @@
 using System;
 using System.Collections.Generic;
-using System.Configuration;
-using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using log4net;
+using PrinterServices.Config;
 using PrinterServices.Drivers;
 using PrinterServices.Queue;
 using PrinterServices.Transport;
@@ -21,24 +20,11 @@ namespace PrinterServices.Workers
         private readonly PrinterServiceDb _db;
         private readonly CancellationTokenSource _cts;
 
-        private readonly int _maxRetries;
-        private readonly int _retryBackoffBaseMs;
-
         public PrintWorker(PrintJobManager jobManager, PrinterServiceDb db)
         {
             _jobManager = jobManager;
             _db = db;
             _cts = new CancellationTokenSource();
-
-            int maxRetries;
-            string maxRetriesStr = ConfigurationManager.AppSettings["MaxRetries"];
-            _maxRetries = (!string.IsNullOrEmpty(maxRetriesStr) && int.TryParse(maxRetriesStr, out maxRetries))
-                ? maxRetries : 3;
-
-            int retryBase;
-            string retryBaseStr = ConfigurationManager.AppSettings["RetryBackoffBaseMs"];
-            _retryBackoffBaseMs = (!string.IsNullOrEmpty(retryBaseStr) && int.TryParse(retryBaseStr, out retryBase))
-                ? retryBase : 500;
         }
 
         public void Start()
@@ -87,6 +73,34 @@ namespace PrinterServices.Workers
 
         private async Task ProcessJobAsync(PrintJob job, CancellationToken ct)
         {
+            var cfg = ConfigManager.Instance;
+            int port = job.Puerto > 0 ? job.Puerto : cfg.GetInt("DefaultPrinterPort", 9100);
+            int connectTimeoutMs = cfg.GetInt("TcpConnectTimeoutMs", 3000);
+
+            // Pre-check: verificar si la impresora está online antes de intentar
+            var printerStatus = await Monitoring.PrinterStatusChecker.CheckAsync(
+                job.ImpresoraIp, port, connectTimeoutMs, ct);
+
+            if (!printerStatus.Online)
+            {
+                Log.WarnFormat("[WORKER] Job {0} — impresora {1} ({2}) OFFLINE, moviendo a WAITING",
+                    job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, job.ImpresoraIp);
+
+                _jobManager.MarkWaiting(job, "Impresora offline: " + (printerStatus.ErrorMessage ?? "sin conexión"));
+                LogPrint(job, "WAITING", "Impresora offline");
+                return;
+            }
+
+            if (!printerStatus.TienePapel)
+            {
+                Log.WarnFormat("[WORKER] Job {0} — impresora {1} SIN PAPEL, moviendo a WAITING",
+                    job.JobId, job.ImpresoraNombre ?? job.ImpresoraId);
+
+                _jobManager.MarkWaiting(job, "Sin papel");
+                LogPrint(job, "WAITING", "Sin papel");
+                return;
+            }
+
             IPrinterDriver driver = DriverFactory.GetDriver(job.PrinterModel);
             Log.DebugFormat("[WORKER] Driver seleccionado: {0} para modelo {1}", driver.ModelName, job.PrinterModel ?? "null");
 
@@ -115,50 +129,60 @@ namespace PrinterServices.Workers
 
         private byte[] BuildPayload(IPrinterDriver driver, PrintJob job)
         {
-            var parts = new List<byte[]>();
+            // Si tiene lineasimprimir, usar modo estructurado
+            if (!string.IsNullOrEmpty(job.LineasImprimirJson))
+            {
+                var lineas = LineaParser.ParseFromJson(job.LineasImprimirJson);
+                if (lineas.Count > 0)
+                {
+                    Log.DebugFormat("[WORKER] Job {0} — modo LINEAS ({1} líneas)", job.JobId, lineas.Count);
+                    return LineaParser.BuildFromLineas(driver, lineas);
+                }
+            }
 
-            // Init
-            parts.Add(driver.GetInitSequence());
+            // Modo tradicional: cadena de texto plano
+            Log.DebugFormat("[WORKER] Job {0} — modo CADENA", job.JobId);
+            var builder = new EscPosCommandBuilder(driver);
+            builder.Init();
+
+            // Aplicar tamaño de letra si viene
+            if (!string.IsNullOrEmpty(job.TamanioLetra))
+            {
+                builder.SetLetterSize(job.TamanioLetra);
+            }
 
             // Texto
             if (!string.IsNullOrEmpty(job.Contenido))
             {
-                parts.Add(driver.GetTextBytes(job.Contenido));
+                builder.Text(job.Contenido);
+            }
+
+            // Abrir gaveta si se solicitó
+            if (job.AbreGaveta)
+            {
+                builder.OpenCashDrawer();
             }
 
             // Corte
-            parts.Add(driver.GetCutCommand(CutType.Partial));
+            builder.Cut(CutType.Partial);
 
-            // Calcular tamaño total
-            int totalLength = 0;
-            foreach (var part in parts)
-            {
-                totalLength += part.Length;
-            }
-
-            // Combinar
-            var result = new byte[totalLength];
-            int offset = 0;
-            foreach (var part in parts)
-            {
-                Buffer.BlockCopy(part, 0, result, offset, part.Length);
-                offset += part.Length;
-            }
-
-            return result;
+            return builder.Build();
         }
 
         private async Task<bool> SendWithRetry(PrintJob job, byte[] payload, CancellationToken ct)
         {
-            int port = job.Puerto > 0 ? job.Puerto : 9100;
+            var cfg = ConfigManager.Instance;
+            int port = job.Puerto > 0 ? job.Puerto : cfg.GetInt("DefaultPrinterPort", 9100);
+            int maxRetries = cfg.GetInt("MaxRetries", 3);
+            int retryBackoffBaseMs = cfg.GetInt("RetryBackoffBaseMs", 500);
 
-            for (int attempt = 0; attempt <= _maxRetries; attempt++)
+            for (int attempt = 0; attempt <= maxRetries; attempt++)
             {
                 if (attempt > 0)
                 {
-                    int backoff = _retryBackoffBaseMs * (1 << (attempt - 1)); // exponential: 500, 1000, 2000
+                    int backoff = retryBackoffBaseMs * (1 << (attempt - 1)); // exponential: 500, 1000, 2000
                     Log.InfoFormat("[WORKER] Job {0} — retry {1}/{2}, esperando {3}ms",
-                        job.JobId, attempt, _maxRetries, backoff);
+                        job.JobId, attempt, maxRetries, backoff);
                     await Task.Delay(backoff, ct);
                 }
 
@@ -180,9 +204,9 @@ namespace PrinterServices.Workers
                     catch (Exception ex)
                     {
                         Log.WarnFormat("[WORKER] Job {0} — fallo intento {1}/{2}: {3}",
-                            job.JobId, attempt + 1, _maxRetries + 1, ex.Message);
+                            job.JobId, attempt + 1, maxRetries + 1, ex.Message);
 
-                        if (attempt == _maxRetries)
+                        if (attempt == maxRetries)
                         {
                             HandleFailure(job, ex.Message);
                             return false;

@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using log4net;
+using PrinterServices.Config;
 using PrinterServices.Data;
 using PrinterServices.Queue;
 
@@ -19,13 +20,13 @@ namespace PrinterServices.Api
         private readonly CancellationTokenSource _cts;
         private readonly int _port;
 
-        public HttpApiServer(int port, PrinterServiceDb db, PrintJobManager jobManager)
+        public HttpApiServer(int port, PrinterServiceDb db, PrintJobManager jobManager, ConfigManager configManager)
         {
             _port = port;
             _cts = new CancellationTokenSource();
             _listener = new HttpListener();
             _listener.Prefixes.Add(string.Format("http://+:{0}/", port));
-            _router = new ApiRouter(db, jobManager);
+            _router = new ApiRouter(db, jobManager, configManager);
         }
 
         public void Start()

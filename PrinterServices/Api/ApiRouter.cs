@@ -6,6 +6,7 @@ using System.Text;
 using System.Threading.Tasks;
 using log4net;
 using PrinterServices.Api.Controllers;
+using PrinterServices.Config;
 using PrinterServices.Data;
 using PrinterServices.Queue;
 
@@ -51,13 +52,15 @@ namespace PrinterServices.Api
         private readonly PrintController _printController;
         private readonly JobController _jobController;
         private readonly PrinterController _printerController;
+        private readonly ConfigController _configController;
 
-        public ApiRouter(PrinterServiceDb db, PrintJobManager jobManager)
+        public ApiRouter(PrinterServiceDb db, PrintJobManager jobManager, ConfigManager configManager)
         {
             _healthController = new HealthController(db);
             _printController = new PrintController(jobManager);
             _jobController = new JobController(jobManager);
             _printerController = new PrinterController(db);
+            _configController = new ConfigController(configManager);
         }
 
         public async Task<ApiResult> RouteAsync(string method, string path, HttpListenerRequest request)
@@ -125,6 +128,42 @@ namespace PrinterServices.Api
                 string segment = path.Substring("/api/job/".Length);
                 string jobId = segment.Substring(0, segment.Length - "/retry".Length);
                 return _jobController.RetryJob(jobId);
+            }
+
+            // ── Config ──
+            if (method == "GET" && path == "/api/config")
+            {
+                return _configController.GetAll();
+            }
+            if (method == "GET" && path.StartsWith("/api/config/category/"))
+            {
+                string category = path.Substring("/api/config/category/".Length);
+                return _configController.GetByCategory(category);
+            }
+            if (method == "GET" && path.StartsWith("/api/config/"))
+            {
+                string key = path.Substring("/api/config/".Length);
+                return _configController.GetSetting(key);
+            }
+            if (method == "PUT" && path == "/api/config")
+            {
+                string body = await ReadBodyAsync(request);
+                return _configController.UpdateSetting(body);
+            }
+            if (method == "PUT" && path == "/api/config/batch")
+            {
+                string body = await ReadBodyAsync(request);
+                return _configController.UpdateBatch(body);
+            }
+            if (method == "POST" && path.StartsWith("/api/config/") && path.EndsWith("/reset"))
+            {
+                string segment = path.Substring("/api/config/".Length);
+                string key = segment.Substring(0, segment.Length - "/reset".Length);
+                return _configController.ResetSetting(key);
+            }
+            if (method == "POST" && path == "/api/config/reset-all")
+            {
+                return _configController.ResetAll();
             }
 
             // TODO Fase 5: GET  /api/notifications/{deviceId}

@@ -148,6 +148,22 @@ namespace PrinterServices.Api.Controllers
                 job.Copias = copias;
             }
 
+            // Phase 2: formatting fields
+            job.TamanioLetra = GetString(json, "impresora_tamanioletra");
+            job.TipoGeneracion = GetString(json, "impresora_tipogeneracion");
+            job.CodigoCorte = GetString(json, "codigocorte");
+            job.QrData = GetString(json, "qrData") ?? GetString(json, "qrEncuesta");
+
+            string abreGaveta = GetString(json, "abregaveta");
+            job.AbreGaveta = abreGaveta == "1" || (abreGaveta != null && abreGaveta.Equals("true", StringComparison.OrdinalIgnoreCase));
+
+            // lineasimprimir: viene como JSON array dentro del objeto
+            JToken lineasToken;
+            if (json.TryGetValue("lineasimprimir", out lineasToken) && lineasToken.Type == JTokenType.Array)
+            {
+                job.LineasImprimirJson = lineasToken.ToString();
+            }
+
             return job;
         }
 

@@ -1,10 +1,10 @@
 using System;
-using System.Configuration;
 using System.IO;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using log4net;
+using PrinterServices.Config;
 
 namespace PrinterServices.Transport
 {
@@ -31,15 +31,9 @@ namespace PrinterServices.Transport
             _ip = ip;
             _port = port;
 
-            int connectTimeout;
-            string connectTimeoutStr = ConfigurationManager.AppSettings["TcpConnectTimeoutMs"];
-            _connectTimeoutMs = (!string.IsNullOrEmpty(connectTimeoutStr) && int.TryParse(connectTimeoutStr, out connectTimeout))
-                ? connectTimeout : 3000;
-
-            int sendTimeout;
-            string sendTimeoutStr = ConfigurationManager.AppSettings["TcpTimeoutMs"];
-            _sendTimeoutMs = (!string.IsNullOrEmpty(sendTimeoutStr) && int.TryParse(sendTimeoutStr, out sendTimeout))
-                ? sendTimeout : 5000;
+            var cfg = ConfigManager.Instance;
+            _connectTimeoutMs = cfg.GetInt("TcpConnectTimeoutMs", 3000);
+            _sendTimeoutMs = cfg.GetInt("TcpSendTimeoutMs", 5000);
         }
 
         public async Task ConnectAsync(CancellationToken ct)

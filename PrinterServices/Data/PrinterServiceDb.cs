@@ -50,6 +50,7 @@ namespace PrinterServices.Data
             CreateTable<Models.PrinterEntity>();
             CreateTable<Models.NotificationEntity>();
             CreateTable<Models.NetworkConfigEntity>();
+            CreateTable<Models.ConfigSettingEntity>();
 
             // Crear índices adicionales
             try

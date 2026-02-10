@@ -71,10 +71,17 @@
     <Compile Include="Drivers\EpsonDriver.cs" />
     <Compile Include="Drivers\StarDriver.cs" />
     <Compile Include="Drivers\BixolonDriver.cs" />
+    <Compile Include="Drivers\EscPosCommandBuilder.cs" />
+    <Compile Include="Drivers\LineaParser.cs" />
     <Compile Include="Transport\ITransport.cs" />
     <Compile Include="Transport\TcpTransport.cs" />
     <Compile Include="Workers\PrintWorker.cs" />
+    <Compile Include="Monitoring\PrinterStatusChecker.cs" />
+    <Compile Include="Monitoring\StatusMonitor.cs" />
+    <Compile Include="Config\ConfigManager.cs" />
+    <Compile Include="Api\Controllers\ConfigController.cs" />
     <Compile Include="Data\PrinterServiceDb.cs" />
+    <Compile Include="Data\Models\ConfigSettingEntity.cs" />
     <Compile Include="Data\Models\PrintJobEntity.cs" />
     <Compile Include="Data\Models\PrintLogEntity.cs" />
     <Compile Include="Data\Models\PrinterEntity.cs" />

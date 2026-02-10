@@ -439,6 +439,13 @@ Self-hosted con `System.Net.HttpListener` (incluido en .NET 4.5.2).
 | `POST` | `/api/job/{jobId}/retry` | Reintentar job fallido | → `Respuesta` |
 | `POST` | `/api/printer/register` | Registrar/actualizar impresora | `Impresora` → `Respuesta` |
 | `GET` | `/api/health` | Health check | → `{ status, uptime, version, printersOnline }` |
+| `GET` | `/api/config` | Todos los settings centralizados | → `{ count, settings[] }` |
+| `GET` | `/api/config/{key}` | Un setting específico | → `{ key, value, defaultValue, ... }` |
+| `GET` | `/api/config/category/{cat}` | Settings por categoría | → `{ category, settings[] }` |
+| `PUT` | `/api/config` | Actualizar un setting (validado) | `{ key, value }` → `{ status, key, value }` |
+| `PUT` | `/api/config/batch` | Actualizar múltiples settings | `{ settings: {k:v,...} }` → `{ status, count }` |
+| `POST` | `/api/config/{key}/reset` | Resetear a valor default | → `{ status, key, value }` |
+| `POST` | `/api/config/reset-all` | Resetear todos a defaults | → `{ status: "ALL_RESET" }` |
 | `GET` | `/api/network/status` | Estado de red y resolución MAC | → `NetworkStatusResponse` |
 
 ---
@@ -483,7 +490,13 @@ CREATE TABLE IF NOT EXISTS print_jobs (
     error_mensaje       TEXT,
     fecha_creacion      TEXT,
     fecha_impresion     TEXT,
-    tipo_impresion      TEXT
+    tipo_impresion      TEXT,
+    lineas_imprimir_json TEXT,          -- JSON array de Linea (formato estructurado)
+    tamanio_letra       TEXT,           -- "1","2","3" → setLetterSize
+    abre_gaveta         INTEGER DEFAULT 0,
+    tipo_generacion     TEXT,           -- tipogeneracion de Impresion
+    qr_data             TEXT,           -- datos para QR code
+    codigo_corte        TEXT            -- código de corte personalizado
 );
 
 CREATE TABLE IF NOT EXISTS print_log (
@@ -540,6 +553,19 @@ CREATE TABLE IF NOT EXISTS notifications (
     fecha               TEXT
 );
 
+-- Tabla: config_settings (configuración centralizada dinámica)
+CREATE TABLE IF NOT EXISTS config_settings (
+    key                 TEXT PRIMARY KEY,
+    value               TEXT,
+    default_value       TEXT,
+    description         TEXT,
+    category            TEXT,           -- network, queue, api, monitoring
+    value_type          TEXT,           -- int, bool, string
+    min_value           TEXT,
+    max_value           TEXT,
+    updated_at          TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_jobs_estado ON print_jobs(estado);
 CREATE INDEX IF NOT EXISTS idx_jobs_impresora ON print_jobs(impresora_id);
 CREATE INDEX IF NOT EXISTS idx_notif_device ON notifications(device_id, entregada);
@@ -585,17 +611,18 @@ CREATE INDEX IF NOT EXISTS idx_printers_mac ON printers(mac_address);
 
 ## 13. Estrategia de Migración (Fases)
 
-| Fase | Entregable | Criterio de éxito |
-|------|-----------|-------------------|
-| **0** | Proyecto creado, TopShelf, BD SQLite, health check | `PrinterServices.exe install && start`, GET /api/health responde |
-| **1** | HTTP API + PrintJobManager + PrintWorker (happy path) | POST /api/print/comanda → imprime en impresora real |
-| **2** | IPrinterDriver por modelo + ITransport TCP | Corte correcto en Epson, Star, Bixolon, Genérica |
-| **3** | Retry + StatusMonitor (DLE EOT) | 3 reintentos automáticos, detecta offline/sin papel |
-| **4** | Cola persistente SQLite completa | Reiniciar servicio no pierde jobs pendientes |
-| **5** | gRPC NotificationManager | Servidor y Cliente reciben notificaciones push |
-| **6** | UDP Discovery | Servidor descubre PrinterServices automáticamente |
-| **7** | Feature flag en PrintUtil del Servidor | `USAR_PRINTER_SERVICE=true` → delega al servicio |
-| **8** | StatusMonitor + alertas UI + MonitoreoRemoto | Cloud ve estado, POS muestra indicadores en tiempo real |
+| Fase | Entregable | Criterio de éxito | Estado |
+|------|-----------|-------------------|--------|
+| **0** | Proyecto creado, TopShelf, BD SQLite, health check | `PrinterServices.exe install && start`, GET /api/health responde | ✅ DONE |
+| **1** | HTTP API + PrintJobManager + PrintWorker (happy path) | POST /api/print/comanda → imprime en impresora real | ✅ DONE |
+| **2** | EscPosCommandBuilder + LineaParser + formatting avanzado | Bold, size, alignment, QR, barcode, lineasimprimir JSON | ✅ DONE |
+| **3** | StatusMonitor (DLE EOT) + WAITING state + pre-check | Detecta offline/sin papel antes de imprimir, re-encola automático | ✅ DONE |
+| **C** | ConfigManager centralizado (SQLite-backed, API REST) | GET/PUT /api/config, valores dinámicos sin reiniciar | ✅ DONE |
+| **4** | Cola persistente SQLite completa | Reiniciar servicio no pierde jobs pendientes | ✅ DONE |
+| **5** | gRPC NotificationManager | Servidor y Cliente reciben notificaciones push | PENDIENTE |
+| **6** | UDP Discovery | Servidor descubre PrinterServices automáticamente | PENDIENTE |
+| **7** | Feature flag en PrintUtil del Servidor | `USAR_PRINTER_SERVICE=true` → delega al servicio | PENDIENTE |
+| **8** | NetworkWatcher + alertas UI + MonitoreoRemoto | Cloud ve estado, POS muestra indicadores en tiempo real | PENDIENTE |
 
 ---
 
@@ -653,25 +680,106 @@ Grpc.Tools                   2.46.6     # Code-gen desde .proto
 
 ---
 
-## 16. Configuración
+## 16. Configuración Centralizada — ConfigManager
 
-### App.config del servicio
+> **Decisión**: Toda la configuración dinámica vive en SQLite (`config_settings`),
+> no en `App.config`. Esto permite actualizar valores en caliente via API REST
+> sin reiniciar el servicio.
+
+### Arquitectura
+
+```
+App.config (solo binding redirects)
+     │
+ConfigManager (singleton)
+     ├── ConcurrentDictionary<string,string> _cache  ← lectura rápida in-memory
+     ├── PrinterServiceDb (SQLite)                   ← persistencia
+     ├── SeedDefaults()                              ← inserta defaults en primera ejecución
+     └── Set(key, value) → actualiza cache + BD simultáneamente
+```
+
+### Settings disponibles (sembrados automáticamente)
+
+| Key | Default | Categoría | Tipo | Rango | Descripción |
+|-----|---------|-----------|------|-------|-------------|
+| `TcpConnectTimeoutMs` | 3000 | network | int | 500-30000 | Timeout conexión TCP a impresoras |
+| `TcpSendTimeoutMs` | 5000 | network | int | 1000-30000 | Timeout envío TCP |
+| `DefaultPrinterPort` | 9100 | network | int | 1-65535 | Puerto TCP default impresoras |
+| `MaxRetries` | 3 | queue | int | 0-10 | Reintentos máximos por job |
+| `RetryBackoffBaseMs` | 500 | queue | int | 100-10000 | Base backoff exponencial (ms) |
+| `HttpPort` | 8090 | api | int | 1024-65535 | Puerto HTTP API |
+| `StatusCheckIntervalSeconds` | 15 | monitoring | int | 5-300 | Intervalo check DLE EOT |
+| `GrpcPort` | 50051 | api | int | 1024-65535 | Puerto gRPC |
+| `UdpDiscoveryPort` | 9999 | network | int | 1024-65535 | Puerto UDP discovery |
+| `NetworkWatcherIntervalSeconds` | 30 | network | int | 10-600 | Intervalo scan de red |
+| `ArpScanIntervalSeconds` | 60 | network | int | 15-600 | Intervalo scan ARP |
+| `AutoLearnGatewayOnFirstRun` | 1 | network | bool | — | Auto-aprender gateway MAC |
+
+### Uso en código (dinámico, sin campos readonly)
+
+```csharp
+// Lectura — siempre obtiene el valor más reciente de la BD
+var cfg = ConfigManager.Instance;
+int timeout = cfg.GetInt("TcpConnectTimeoutMs", 3000);
+bool autoLearn = cfg.GetBool("AutoLearnGatewayOnFirstRun", true);
+string value = cfg.GetString("CustomKey", "default");
+
+// Escritura — actualiza cache + BD atómicamente
+cfg.Set("TcpConnectTimeoutMs", "5000");
+cfg.SetInt("MaxRetries", 5);
+cfg.SetBool("AutoLearnGatewayOnFirstRun", false);
+```
+
+### API REST — Ejemplos con curl
+
+```bash
+# ── Leer todos los settings ──
+curl http://localhost:8090/api/config
+# → {"count":12,"settings":[{"key":"TcpConnectTimeoutMs","value":"3000",...},...]}
+
+# ── Leer por categoría ──
+curl http://localhost:8090/api/config/category/network
+# → {"category":"network","settings":[...]}
+
+# ── Leer uno específico ──
+curl http://localhost:8090/api/config/MaxRetries
+# → {"key":"MaxRetries","value":"3","defaultValue":"3","description":"...","valueType":"int","minValue":"0","maxValue":"10"}
+
+# ── Actualizar un setting (con validación de rango) ──
+curl -X PUT http://localhost:8090/api/config -d '{"key":"TcpConnectTimeoutMs","value":"5000"}'
+# → {"status":"UPDATED","key":"TcpConnectTimeoutMs","value":"5000"}
+# ⚠ Si value < minValue o > maxValue → 400 Bad Request
+
+# ── Actualizar múltiples settings de una vez ──
+curl -X PUT http://localhost:8090/api/config/batch \
+  -d '{"settings":{"MaxRetries":"5","RetryBackoffBaseMs":"1000","TcpConnectTimeoutMs":"4000"}}'
+# → {"status":"UPDATED","count":3}
+
+# ── Resetear un setting a su default ──
+curl -X POST http://localhost:8090/api/config/MaxRetries/reset
+# → {"status":"RESET","key":"MaxRetries","value":"3"}
+
+# ── Resetear TODOS a defaults ──
+curl -X POST http://localhost:8090/api/config/reset-all
+# → {"status":"ALL_RESET"}
+```
+
+### App.config (mínimo — solo binding redirects)
 
 ```xml
-<appSettings>
-  <add key="HttpPort" value="8090" />
-  <add key="GrpcPort" value="50051" />
-  <add key="UdpDiscoveryPort" value="9999" />
-  <add key="StatusCheckIntervalSeconds" value="15" />
-  <add key="MaxRetries" value="3" />
-  <add key="RetryBackoffBaseMs" value="500" />
-  <add key="DefaultPrinterPort" value="9100" />
-  <add key="TcpTimeoutMs" value="5000" />
-  <add key="TcpConnectTimeoutMs" value="3000" />
-  <add key="NetworkWatcherIntervalSeconds" value="30" />
-  <add key="ArpScanIntervalSeconds" value="60" />
-  <add key="AutoLearnGatewayOnFirstRun" value="true" />
-</appSettings>
+<configuration>
+  <runtime>
+    <assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">
+      <dependentAssembly>
+        <assemblyIdentity name="Newtonsoft.Json" publicKeyToken="30ad4fe6b2a6aeed" culture="neutral" />
+        <bindingRedirect oldVersion="0.0.0.0-13.0.0.0" newVersion="13.0.0.0" />
+      </dependentAssembly>
+    </assemblyBinding>
+  </runtime>
+  <startup>
+    <supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.5.2" />
+  </startup>
+</configuration>
 ```
 
 ### Feature Flags (config_fla.cfg del Servidor)

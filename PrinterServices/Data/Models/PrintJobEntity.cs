@@ -68,6 +68,24 @@ namespace PrinterServices.Data.Models
         [Column("tipo_impresion")]
         public string TipoImpresion { get; set; }
 
+        [Column("lineas_imprimir_json")]
+        public string LineasImprimirJson { get; set; }
+
+        [Column("tamanio_letra")]
+        public string TamanioLetra { get; set; }
+
+        [Column("abre_gaveta")]
+        public int AbreGaveta { get; set; }
+
+        [Column("tipo_generacion")]
+        public string TipoGeneracion { get; set; }
+
+        [Column("qr_data")]
+        public string QrData { get; set; }
+
+        [Column("codigo_corte")]
+        public string CodigoCorte { get; set; }
+
         public PrintJobEntity()
         {
             Copias = 1;

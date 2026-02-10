@@ -28,6 +28,12 @@ namespace PrinterServices.Queue
         public int Copias { get; set; }
         public int Prioridad { get; set; }
         public int Puerto { get; set; }
+        public string LineasImprimirJson { get; set; }
+        public string TamanioLetra { get; set; }
+        public bool AbreGaveta { get; set; }
+        public string TipoGeneracion { get; set; }
+        public string QrData { get; set; }
+        public string CodigoCorte { get; set; }
 
         public PrintJobStatus Estado { get; set; }
         public int Reintentos { get; set; }
@@ -71,7 +77,13 @@ namespace PrinterServices.Queue
                 MaxReintentos = this.MaxReintentos,
                 ErrorMensaje = this.ErrorMensaje,
                 FechaCreacion = this.FechaCreacion.ToString("o"),
-                FechaImpresion = this.FechaImpresion?.ToString("o")
+                FechaImpresion = this.FechaImpresion?.ToString("o"),
+                LineasImprimirJson = this.LineasImprimirJson,
+                TamanioLetra = this.TamanioLetra,
+                AbreGaveta = this.AbreGaveta ? 1 : 0,
+                TipoGeneracion = this.TipoGeneracion,
+                QrData = this.QrData,
+                CodigoCorte = this.CodigoCorte
             };
         }
 
@@ -118,7 +130,13 @@ namespace PrinterServices.Queue
                 ErrorMensaje = entity.ErrorMensaje,
                 FechaCreacion = fechaCreacion,
                 FechaImpresion = fechaImpresion,
-                Puerto = 9100
+                Puerto = 9100,
+                LineasImprimirJson = entity.LineasImprimirJson,
+                TamanioLetra = entity.TamanioLetra,
+                AbreGaveta = entity.AbreGaveta == 1,
+                TipoGeneracion = entity.TipoGeneracion,
+                QrData = entity.QrData,
+                CodigoCorte = entity.CodigoCorte
             };
         }
 
