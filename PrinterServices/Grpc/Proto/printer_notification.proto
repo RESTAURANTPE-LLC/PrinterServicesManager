@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package printerservices;
+
+option csharp_namespace = "PrinterServices.Grpc";
+
+service PrinterNotification {
+  // Stream: el Servidor se suscribe a notificaciones de estado
+  rpc SuscribirNotificacionesServidor(SuscripcionRequest)
+      returns (stream NotificacionEvent);
+
+  // Stream: un Cliente se suscribe a notificaciones de sus comandas
+  rpc SuscribirNotificacionesCliente(SuscripcionRequest)
+      returns (stream NotificacionEvent);
+
+  // Unary: consultar estado de todas las impresoras
+  rpc GetStatusPrinters(Empty) returns (StatusPrintersResponse);
+}
+
+message SuscripcionRequest {
+  string device_id = 1;
+  string ip = 2;
+  string rol = 3;    // "SERVIDOR" o "CLIENTE"
+}
+
+message NotificacionEvent {
+  string tipo = 1;              // IMPRESA, FALLIDA, OFFLINE, ONLINE, SIN_PAPEL
+  string comanda_id = 2;
+  string impresora_id = 3;
+  string impresora_nombre = 4;
+  string device_id_origen = 5;  // quien genero el pedido original
+  string ip_origen = 6;
+  string mensaje = 7;
+  string timestamp = 8;
+  int32 reintentos = 9;
+  string job_id = 10;
+}
+
+message StatusPrintersResponse {
+  repeated PrinterStatusInfo printers = 1;
+}
+
+message PrinterStatusInfo {
+  string impresora_id = 1;
+  string nombre = 2;
+  string ip = 3;
+  bool online = 4;
+  bool tiene_papel = 5;
+  bool tapa_abierta = 6;
+  string ultimo_check = 7;
+  int32 jobs_pendientes = 8;
+}
+
+message Empty {}
