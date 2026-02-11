@@ -40,7 +40,9 @@ namespace PrinterServices.Data
                 // Habilitar WAL mode: permite lecturas concurrentes + 1 escritor simultáneo.
                 // Sin esto, accesos simultáneos desde hilos gRPC/StatusMonitor/PrintWorker
                 // causan deadlock o "database is locked".
-                _instance.Execute("PRAGMA journal_mode=WAL");
+                // ExecuteScalar porque PRAGMA journal_mode devuelve una fila con el modo actual
+                var walResult = _instance.ExecuteScalar<string>("PRAGMA journal_mode=WAL");
+                Log.InfoFormat("[DB] WAL mode: {0}", walResult);
                 // busy_timeout: si otro hilo tiene el lock, esperar hasta 5s antes de fallar
                 _instance.Execute("PRAGMA busy_timeout=5000");
 
