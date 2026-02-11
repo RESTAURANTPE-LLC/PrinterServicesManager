@@ -36,6 +36,14 @@ namespace PrinterServices.Data
 
                 string dbPath = Path.Combine(specificFolder, "printerservice.db");
                 _instance = new PrinterServiceDb(dbPath);
+
+                // Habilitar WAL mode: permite lecturas concurrentes + 1 escritor simultáneo.
+                // Sin esto, accesos simultáneos desde hilos gRPC/StatusMonitor/PrintWorker
+                // causan deadlock o "database is locked".
+                _instance.Execute("PRAGMA journal_mode=WAL");
+                // busy_timeout: si otro hilo tiene el lock, esperar hasta 5s antes de fallar
+                _instance.Execute("PRAGMA busy_timeout=5000");
+
                 _instance.CreateTables();
 
                 Log.InfoFormat("[DB] Base de datos creada/abierta en: {0}", dbPath);
