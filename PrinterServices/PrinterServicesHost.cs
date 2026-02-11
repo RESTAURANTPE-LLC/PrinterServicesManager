@@ -3,7 +3,9 @@ using log4net;
 using PrinterServices.Api;
 using PrinterServices.Config;
 using PrinterServices.Data;
+using PrinterServices.Grpc;
 using PrinterServices.Monitoring;
+using PrinterServices.Notifications;
 using PrinterServices.Queue;
 using PrinterServices.Workers;
 
@@ -19,6 +21,8 @@ namespace PrinterServices
         private PrintJobManager _jobManager;
         private PrintWorker _printWorker;
         private StatusMonitor _statusMonitor;
+        private NotificationManager _notifManager;
+        private GrpcNotificationServer _grpcServer;
 
         public void Start()
         {
@@ -56,7 +60,19 @@ namespace PrinterServices
                 _statusMonitor = new StatusMonitor(_db, _jobManager);
                 _statusMonitor.Start();
 
-                // TODO Fase 5: gRPC NotificationManager
+                // 7. Inicializar NotificationManager (dispatcher central de notificaciones)
+                // Singleton que gestiona suscriptores gRPC y difunde eventos de impresión/estado.
+                // Debe inicializarse ANTES del gRPC server y DESPUÉS de la BD.
+                _notifManager = NotificationManager.GetInstance(_db);
+                Log.Info("[NOTIF] NotificationManager inicializado");
+
+                // 8. Inicializar gRPC server (Grpc.Core 2.46.6, puerto configurable)
+                // Expone 3 RPCs: SuscribirNotificacionesServidor, SuscribirNotificacionesCliente, GetStatusPrinters
+                // Los Quipunet.exe (Servidor y Clientes) se conectan aquí para recibir notificaciones push.
+                _grpcServer = new GrpcNotificationServer(_db, _notifManager, _jobManager);
+                _grpcServer.Start(); // Abre socket en GrpcBindAddress:GrpcPort (default 0.0.0.0:50051)
+                int grpcPort = _configManager.GetInt("GrpcPort", 50051);
+
                 // TODO Fase 6: UdpDiscoveryServer
                 // TODO Fase 8: NetworkWatcher (proceso paralelo)
 
@@ -65,6 +81,7 @@ namespace PrinterServices
                 Log.InfoFormat("  HTTP: http://localhost:{0}/api/health", httpPort);
                 Log.InfoFormat("  POST: http://localhost:{0}/api/print/comanda", httpPort);
                 Log.InfoFormat("  GET:  http://localhost:{0}/api/config", httpPort);
+                Log.InfoFormat("  gRPC: localhost:{0}", grpcPort);
                 Log.Info("═══════════════════════════════════════════════");
             }
             catch (Exception ex)
@@ -96,6 +113,13 @@ namespace PrinterServices
                 {
                     _statusMonitor.Stop();
                     Log.Info("[MONITOR] StatusMonitor detenido");
+                }
+
+                // Detener gRPC server (graceful shutdown, espera hasta 5s para cerrar streams)
+                if (_grpcServer != null)
+                {
+                    _grpcServer.Stop();
+                    Log.Info("[gRPC] Servidor gRPC detenido");
                 }
 
                 if (_db != null)

@@ -9,6 +9,7 @@ using PrinterServices.Queue;
 using PrinterServices.Transport;
 using PrinterServices.Data;
 using PrinterServices.Data.Models;
+using PrinterServices.Notifications;
 
 namespace PrinterServices.Workers
 {
@@ -86,8 +87,13 @@ namespace PrinterServices.Workers
                 Log.WarnFormat("[WORKER] Job {0} — impresora {1} ({2}) OFFLINE, moviendo a WAITING",
                     job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, job.ImpresoraIp);
 
-                _jobManager.MarkWaiting(job, "Impresora offline: " + (printerStatus.ErrorMessage ?? "sin conexión"));
+                string offlineMsg = "Impresora offline: " + (printerStatus.ErrorMessage ?? "sin conexión");
+                _jobManager.MarkWaiting(job, offlineMsg);
                 LogPrint(job, "WAITING", "Impresora offline");
+                // Notificar WAITING via gRPC → servidores + cliente origen
+                NotifyIfAvailable(n => n.NotifyPrintWaiting(
+                    job.JobId, job.ComandaId, job.ImpresoraId,
+                    job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen, offlineMsg));
                 return;
             }
 
@@ -98,6 +104,10 @@ namespace PrinterServices.Workers
 
                 _jobManager.MarkWaiting(job, "Sin papel");
                 LogPrint(job, "WAITING", "Sin papel");
+                // Notificar WAITING por sin papel via gRPC → servidores + cliente origen
+                NotifyIfAvailable(n => n.NotifyPrintWaiting(
+                    job.JobId, job.ComandaId, job.ImpresoraId,
+                    job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen, "Sin papel"));
                 return;
             }
 
@@ -125,6 +135,10 @@ namespace PrinterServices.Workers
             // Éxito
             _jobManager.MarkDone(job);
             LogPrint(job, "DONE", "Impresión completada");
+            // Notificar éxito via gRPC → servidores + cliente origen
+            NotifyIfAvailable(n => n.NotifyPrintSuccess(
+                job.JobId, job.ComandaId, job.ImpresoraId,
+                job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen));
         }
 
         private byte[] BuildPayload(IPrinterDriver driver, PrintJob job)
@@ -224,11 +238,44 @@ namespace PrinterServices.Workers
             {
                 _jobManager.Retry(job);
                 LogPrint(job, "RETRY", error);
+                // Notificar REINTENTO via gRPC → solo servidores (informativo, el job aún no terminó)
+                NotifyIfAvailable(n => n.NotifyPrintRetry(
+                    job.JobId, job.ComandaId, job.ImpresoraId,
+                    job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen, job.Reintentos + 1));
             }
             else
             {
                 _jobManager.MarkFailed(job, error);
                 LogPrint(job, "FAILED", error);
+                // Notificar FALLIDA via gRPC → servidores + cliente origen (todos los reintentos agotados)
+                NotifyIfAvailable(n => n.NotifyPrintFailed(
+                    job.JobId, job.ComandaId, job.ImpresoraId,
+                    job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen,
+                    error, job.Reintentos));
+            }
+        }
+
+        /// <summary>
+        /// Helper para enviar notificaciones de forma segura.
+        /// Si NotificationManager aún no fue inicializado (ej: durante arranque),
+        /// captura InvalidOperationException y la ignora silenciosamente.
+        /// Cualquier otro error se loguea pero NO detiene el flujo de impresión.
+        /// Esto desacopla el worker de gRPC: si las notificaciones fallan, la impresión sigue.
+        /// </summary>
+        private void NotifyIfAvailable(Action<NotificationManager> action)
+        {
+            try
+            {
+                action(NotificationManager.Instance); // Ejecuta la acción de notificación
+            }
+            catch (InvalidOperationException)
+            {
+                // NotificationManager aún no inicializado (GetInstance no fue llamado) — ignorar
+            }
+            catch (Exception ex)
+            {
+                // Error al notificar — loguear pero NO relanzar, la impresión no debe fallar por esto
+                Log.Warn("[WORKER] Error al notificar: " + ex.Message);
             }
         }
 

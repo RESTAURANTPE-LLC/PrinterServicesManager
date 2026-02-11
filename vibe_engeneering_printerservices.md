@@ -657,7 +657,7 @@ CREATE INDEX IF NOT EXISTS idx_printers_mac ON printers(mac_address);
 | **3** | StatusMonitor (DLE EOT) + WAITING state + pre-check | Detecta offline/sin papel antes de imprimir, re-encola automático | ✅ DONE |
 | **C** | ConfigManager centralizado (SQLite-backed, API REST) | GET/PUT /api/config, valores dinámicos sin reiniciar | ✅ DONE |
 | **4** | Cola persistente SQLite completa | Reiniciar servicio no pierde jobs pendientes | ✅ DONE |
-| **5** | gRPC NotificationManager | Servidor y Cliente reciben notificaciones push | PENDIENTE |
+| **5** | gRPC NotificationManager | Servidor y Cliente reciben notificaciones push | ✅ DONE |
 | **6** | UDP Discovery | Servidor descubre PrinterServices automáticamente | PENDIENTE |
 | **7** | Feature flag en PrintUtil del Servidor | `USAR_PRINTER_SERVICE=true` → delega al servicio | PENDIENTE |
 | **8** | NetworkWatcher + alertas UI + MonitoreoRemoto | Cloud ve estado, POS muestra indicadores en tiempo real | PENDIENTE |

@@ -91,13 +91,14 @@ printerservices/
     │                                  # Referencia QuipuNetX.dll
     │
     ├── PrinterServices.csproj         # Proyecto único. Incluye TODOS los archivos.
-    ├── packages.config                # TopShelf, log4net, Newtonsoft.Json
+    ├── packages.config                # TopShelf, log4net, Newtonsoft.Json, Grpc.Core, Google.Protobuf
     ├── App.config                     # Solo binding redirects (Newtonsoft.Json v12→v13)
     ├── log4net.config                 # Logging a archivo + consola
     ├── Program.cs                     # Bootstrap TopShelf + log4net
     ├── PrinterServicesHost.cs         # Start() / Stop() — orquesta todo.
     │                                  # Inicializa: DB → ConfigManager → Queue → Worker
     │                                  #             → HTTP API → StatusMonitor
+    │                                  #             → NotificationManager → gRPC Server
     │
     ├── Config/                        # ── CONFIGURACIÓN CENTRALIZADA ──
     │   └── ConfigManager.cs           # ★ Singleton, SQLite-backed, cache ConcurrentDict
@@ -159,6 +160,26 @@ printerservices/
     │   ├── ITransport.cs             # Interfaz: ConnectAsync, SendAsync, ReceiveAsync, Dispose
     │   └── TcpTransport.cs           # TCP:9100, timeouts desde ConfigManager
     │                                  # (SerialTransport.cs, UsbTransport.cs → futuro)
+    │
+    ├── Notifications/                 # ── DISPATCHER DE NOTIFICACIONES ──
+    │   └── NotificationManager.cs    # ★ Singleton, ConcurrentDict de suscriptores
+    │                                  # Recibe eventos de PrintWorker/StatusMonitor
+    │                                  # Difunde via gRPC server-streaming
+    │                                  # Persiste en SQLite para entrega diferida
+    │                                  # API: NotifyPrintSuccess/Failed/Waiting/Retry
+    │                                  #      NotifyPrinterStatusChange
+    │
+    ├── Grpc/                          # ── SERVIDOR gRPC (Grpc.Core 2.46.6) ──
+    │   ├── Proto/
+    │   │   └── printer_notification.proto  # Contrato protobuf (3 RPCs)
+    │   ├── Generated/
+    │   │   ├── PrinterNotification.cs      # Auto-generado por protoc
+    │   │   └── PrinterNotificationGrpc.cs  # Auto-generado por grpc_csharp_plugin
+    │   ├── GrpcNotificationServer.cs      # Host: Grpc.Core.Server en puerto 50051
+    │   └── PrinterNotificationServiceImpl.cs  # Implementa PrinterNotificationBase
+    │                                  # SuscribirNotificacionesServidor (server-streaming)
+    │                                  # SuscribirNotificacionesCliente (server-streaming)
+    │                                  # GetStatusPrinters (unary)
     │
     └── Data/                          # ── PERSISTENCIA SQLITE ──
         │                              # BD: %AppData%\QuipuNet\printerservice.db
@@ -356,7 +377,7 @@ default               → GenericEscPosDriver
 | **3** StatusMonitor (DLE EOT) + WAITING state | ✅ DONE |
 | **C** ConfigManager centralizado (SQLite + API REST) | ✅ DONE |
 | **4** Cola persistente SQLite completa | ✅ DONE |
-| **5** gRPC NotificationManager | PENDIENTE |
+| **5** gRPC NotificationManager | ✅ DONE |
 | **6** UDP Discovery | PENDIENTE |
 | **7** Feature flag en PrintUtil del Servidor | PENDIENTE |
 | **8** NetworkWatcher + alertas UI + MonitoreoRemoto | PENDIENTE |

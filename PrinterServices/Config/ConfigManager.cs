@@ -298,6 +298,12 @@ namespace PrinterServices.Config
                 },
                 new ConfigSettingEntity
                 {
+                    Key = "GrpcBindAddress", Value = "0.0.0.0", DefaultValue = "0.0.0.0",
+                    Description = "Dirección de binding del servidor gRPC",
+                    Category = "api", ValueType = "string"
+                },
+                new ConfigSettingEntity
+                {
                     Key = "UdpDiscoveryPort", Value = "9999", DefaultValue = "9999",
                     Description = "Puerto UDP para descubrimiento de servicio",
                     Category = "network", ValueType = "int", MinValue = "1024", MaxValue = "65535"

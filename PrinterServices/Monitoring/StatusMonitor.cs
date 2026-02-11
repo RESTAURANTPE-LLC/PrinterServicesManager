@@ -7,6 +7,7 @@ using log4net;
 using PrinterServices.Config;
 using PrinterServices.Data;
 using PrinterServices.Data.Models;
+using PrinterServices.Notifications;
 using PrinterServices.Queue;
 
 namespace PrinterServices.Monitoring
@@ -110,20 +111,35 @@ namespace PrinterServices.Monitoring
 
                     _db.Update(printer);
 
-                    // Detectar cambio de estado
+                    // Detectar transiciones de estado para emitir notificaciones gRPC
                     if (!wasOnline && status.Online)
                     {
+                        // Transición OFFLINE → ONLINE: re-encolar jobs WAITING y notificar
                         Log.InfoFormat("[MONITOR] ✓ {0} ({1}) ONLINE — re-encolando jobs en espera",
                             printer.Nombre ?? printer.ImpresoraId, printer.Ip);
 
-                        // Re-encolar jobs WAITING de esta impresora
-                        RequeueWaitingJobs(printer.ImpresoraId);
+                        RequeueWaitingJobs(printer.ImpresoraId); // Mover jobs WAITING → PENDING en la cola
+                        // Notificar ONLINE via gRPC → solo servidores (evento de infraestructura)
+                        NotifyPrinterChange(printer.ImpresoraId, printer.Nombre,
+                            NotificationType.Online, "Impresora en línea");
                     }
                     else if (wasOnline && !status.Online)
                     {
+                        // Transición ONLINE → OFFLINE: notificar a servidores
                         Log.WarnFormat("[MONITOR] ✗ {0} ({1}) OFFLINE — {2}",
                             printer.Nombre ?? printer.ImpresoraId, printer.Ip,
                             status.ErrorMessage ?? "sin conexión");
+                        // Notificar OFFLINE via gRPC → solo servidores
+                        NotifyPrinterChange(printer.ImpresoraId, printer.Nombre,
+                            NotificationType.Offline, status.ErrorMessage ?? "sin conexión");
+                    }
+
+                    // Detectar si la impresora sigue sin papel (ya fue marcada en la BD)
+                    if (!status.TienePapel && printer.TienePapel == 0)
+                    {
+                        // Notificar SIN_PAPEL via gRPC → solo servidores
+                        NotifyPrinterChange(printer.ImpresoraId, printer.Nombre,
+                            NotificationType.SinPapel, "Impresora sin papel");
                     }
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -164,6 +180,31 @@ namespace PrinterServices.Monitoring
             catch (Exception ex)
             {
                 Log.Error("[MONITOR] Error re-encolando jobs WAITING: " + ex.Message, ex);
+            }
+        }
+
+        /// <summary>
+        /// Helper para enviar notificaciones de cambio de estado de impresora via gRPC.
+        /// Mismo patrón que NotifyIfAvailable en PrintWorker: captura errores
+        /// silenciosamente para no afectar el ciclo de monitoreo.
+        /// Solo envía a servidores suscritos (los clientes no reciben eventos de infraestructura).
+        /// </summary>
+        private void NotifyPrinterChange(string impresoraId, string nombre, string tipo, string mensaje)
+        {
+            try
+            {
+                // Delegar al NotificationManager que difunde a servidores suscritos via gRPC
+                NotificationManager.Instance.NotifyPrinterStatusChange(
+                    impresoraId, nombre, tipo, mensaje);
+            }
+            catch (InvalidOperationException)
+            {
+                // NotificationManager aún no inicializado (GetInstance no fue llamado) — ignorar
+            }
+            catch (Exception ex)
+            {
+                // Error al notificar — loguear pero NO relanzar, el monitoreo debe continuar
+                Log.Warn("[MONITOR] Error al notificar cambio de estado: " + ex.Message);
             }
         }
 
