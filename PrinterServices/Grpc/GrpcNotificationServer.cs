@@ -1,5 +1,7 @@
 using System;
 using Grpc.Core;
+using Grpc.Reflection;
+using Grpc.Reflection.V1Alpha;
 using log4net;
 using PrinterServices.Config;
 using PrinterServices.Data;
@@ -59,11 +61,21 @@ namespace PrinterServices.Grpc
             // Crear la implementación del servicio con sus dependencias
             var serviceImpl = new PrinterNotificationServiceImpl(_db, _notifManager, _jobManager);
 
+            // Crear servicio de Reflection (permite a grpcurl listar servicios sin .proto)
+            var reflectionImpl = new ReflectionServiceImpl(
+                new[] { PrinterNotification.Descriptor.FullName },
+                SymbolRegistry.FromFiles(new[] { PrinterNotificationReflection.Descriptor }));
+
             // Construir y configurar el servidor gRPC
             _server = new Server
             {
-                // Registrar el servicio generado por protoc (BindService enlaza los 3 RPCs)
-                Services = { PrinterNotification.BindService(serviceImpl) },
+                Services =
+                {
+                    // Registrar el servicio generado por protoc (BindService enlaza los 3 RPCs)
+                    PrinterNotification.BindService(serviceImpl),
+                    // Registrar Reflection para que grpcurl/herramientas puedan descubrir servicios
+                    ServerReflection.BindService(reflectionImpl)
+                },
                 // Configurar puerto — Insecure porque es red local sin TLS
                 Ports = { new ServerPort(host, port, ServerCredentials.Insecure) }
             };
