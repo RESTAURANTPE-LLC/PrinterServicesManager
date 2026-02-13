@@ -169,6 +169,12 @@ printerservices/
     │                                  # API: NotifyPrintSuccess/Failed/Waiting/Retry
     │                                  #      NotifyPrinterStatusChange
     │
+    ├── Discovery/                     # ── AUTO-DESCUBRIMIENTO UDP ──
+    │   └── UdpDiscoveryServer.cs    # Escucha UDP 9999, responde a "QUIPU_PRINTER_DISCOVERY"
+    │                                  # Respuesta unicast: "QUIPU_PRINTER_SERVICE|IP|HttpPort|GrpcPort"
+    │                                  # Hilo background con CancellationToken
+    │                                  # Config: UdpDiscoveryPort (9999), UdpDiscoveryEnabled (true)
+    │
     ├── Grpc/                          # ── SERVIDOR gRPC (Grpc.Core 2.46.6) ──
     │   ├── Proto/
     │   │   └── printer_notification.proto  # Contrato protobuf (3 RPCs)
@@ -378,7 +384,7 @@ default               → GenericEscPosDriver
 | **C** ConfigManager centralizado (SQLite + API REST) | ✅ DONE |
 | **4** Cola persistente SQLite completa | ✅ DONE |
 | **5** gRPC NotificationManager | ✅ DONE |
-| **6** UDP Discovery | PENDIENTE |
+| **6** UDP Discovery | ✅ DONE |
 | **7** Feature flag en PrintUtil del Servidor | PENDIENTE |
 | **8** NetworkWatcher + alertas UI + MonitoreoRemoto | PENDIENTE |
 

@@ -44,7 +44,8 @@ namespace PrinterServices.Data
                 var walResult = _instance.ExecuteScalar<string>("PRAGMA journal_mode=WAL");
                 Log.InfoFormat("[DB] WAL mode: {0}", walResult);
                 // busy_timeout: si otro hilo tiene el lock, esperar hasta 5s antes de fallar
-                _instance.Execute("PRAGMA busy_timeout=5000");
+                var busyResult = _instance.ExecuteScalar<string>("PRAGMA busy_timeout=5000");
+                Log.InfoFormat("[DB] busy_timeout: {0}", busyResult);
 
                 _instance.CreateTables();
 

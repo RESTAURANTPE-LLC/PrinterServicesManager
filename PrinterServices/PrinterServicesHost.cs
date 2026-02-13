@@ -7,6 +7,7 @@ using PrinterServices.Grpc;
 using PrinterServices.Monitoring;
 using PrinterServices.Notifications;
 using PrinterServices.Queue;
+using PrinterServices.Discovery;
 using PrinterServices.Workers;
 
 namespace PrinterServices
@@ -23,6 +24,7 @@ namespace PrinterServices
         private StatusMonitor _statusMonitor;
         private NotificationManager _notifManager;
         private GrpcNotificationServer _grpcServer;
+        private UdpDiscoveryServer _udpDiscovery;     // Fase 6: auto-descubrimiento UDP
 
         public void Start()
         {
@@ -73,7 +75,14 @@ namespace PrinterServices
                 _grpcServer.Start(); // Abre socket en GrpcBindAddress:GrpcPort (default 0.0.0.0:50051)
                 int grpcPort = _configManager.GetInt("GrpcPort", 50051);
 
-                // TODO Fase 6: UdpDiscoveryServer
+                // 9. Inicializar UDP Discovery Server (auto-descubrimiento en red local)
+                // Quipunet.exe envía broadcast "QUIPU_PRINTER_DISCOVERY" en UDP 9999.
+                // PrinterServices responde unicast con IP|HttpPort|GrpcPort.
+                // Configurable: UdpDiscoveryEnabled (bool), UdpDiscoveryPort (int).
+                _udpDiscovery = new UdpDiscoveryServer();
+                _udpDiscovery.Start();
+                int udpPort = _configManager.GetInt("UdpDiscoveryPort", 9999);
+
                 // TODO Fase 8: NetworkWatcher (proceso paralelo)
 
                 Log.Info("═══════════════════════════════════════════════");
@@ -82,6 +91,7 @@ namespace PrinterServices
                 Log.InfoFormat("  POST: http://localhost:{0}/api/print/comanda", httpPort);
                 Log.InfoFormat("  GET:  http://localhost:{0}/api/config", httpPort);
                 Log.InfoFormat("  gRPC: localhost:{0}", grpcPort);
+                Log.InfoFormat("  UDP:  broadcast:{0} (discovery)", udpPort);
                 Log.Info("═══════════════════════════════════════════════");
             }
             catch (Exception ex)
@@ -113,6 +123,12 @@ namespace PrinterServices
                 {
                     _statusMonitor.Stop();
                     Log.Info("[MONITOR] StatusMonitor detenido");
+                }
+
+                // Detener UDP Discovery (cancela el loop de escucha)
+                if (_udpDiscovery != null)
+                {
+                    _udpDiscovery.Stop();
                 }
 
                 // Detener gRPC server (graceful shutdown, espera hasta 5s para cerrar streams)

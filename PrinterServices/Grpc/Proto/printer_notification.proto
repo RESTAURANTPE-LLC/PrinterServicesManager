@@ -44,11 +44,14 @@ message PrinterStatusInfo {
   string impresora_id = 1;
   string nombre = 2;
   string ip = 3;
-  bool online = 4;
+  bool online = 4;                          // Conectividad TCP (responde a DLE EOT)
   bool tiene_papel = 5;
   bool tapa_abierta = 6;
   string ultimo_check = 7;
   int32 jobs_pendientes = 8;
+  bool disponible_para_imprimir = 9;        // online && tiene_papel && !tapa_abierta
+  string estado_conexion = 10;              // "ONLINE" o "OFFLINE" (siempre visible en JSON)
+  string estado_disponibilidad = 11;        // "DISPONIBLE" o "NO_DISPONIBLE" (siempre visible)
 }
 
 message Empty {}

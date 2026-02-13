@@ -153,19 +153,28 @@ namespace PrinterServices.Grpc
                         "SELECT COUNT(*) FROM print_jobs WHERE impresora_id = ? AND estado IN ('PENDING','PRINTING','WAITING')",
                         p.ImpresoraId);
 
-                    // Construir mensaje protobuf PrinterStatusInfo con los datos de BD
-                    // Los campos int (EstadoOnline, TienePapel, TapaAbierta) se convierten a bool
-                    // porque la tabla SQLite usa 0/1 pero el proto usa bool
+                    // Convertir campos int de SQLite (0/1) a bool
+                    bool isOnline = p.EstadoOnline == 1;       // Conectividad TCP (DLE EOT responde)
+                    bool tienePapel = p.TienePapel == 1;       // DLE EOT 4 reportó papel ok
+                    bool tapaAbierta = p.TapaAbierta == 1;     // DLE EOT 2 reportó tapa abierta
+
+                    // Disponible para imprimir = online + tiene papel + tapa cerrada
+                    bool disponible = isOnline && tienePapel && !tapaAbierta;
+
                     response.Printers.Add(new PrinterStatusInfo
                     {
-                        ImpresoraId = p.ImpresoraId ?? "",     // ID único de la impresora
-                        Nombre = p.Nombre ?? "",               // Nombre legible (ej: "Cocina")
-                        Ip = p.Ip ?? "",                       // IP de la impresora (ej: "10.0.0.50")
-                        Online = p.EstadoOnline == 1,          // true si el último DLE EOT fue exitoso
-                        TienePapel = p.TienePapel == 1,        // true si DLE EOT 4 reportó papel ok
-                        TapaAbierta = p.TapaAbierta == 1,      // true si DLE EOT 2 reportó tapa abierta
-                        UltimoCheck = p.UltimoCheck ?? "",     // Timestamp ISO 8601 del último chequeo
-                        JobsPendientes = pendingCount           // Cantidad de jobs en cola
+                        ImpresoraId = p.ImpresoraId ?? "",
+                        Nombre = p.Nombre ?? "",
+                        Ip = p.Ip ?? "",
+                        Online = isOnline,
+                        TienePapel = tienePapel,
+                        TapaAbierta = tapaAbierta,
+                        UltimoCheck = p.UltimoCheck ?? "",
+                        JobsPendientes = pendingCount,
+                        // Campos nuevos: siempre visibles en JSON (string nunca se omite si no está vacío)
+                        DisponibleParaImprimir = disponible,
+                        EstadoConexion = isOnline ? "ONLINE" : "OFFLINE",
+                        EstadoDisponibilidad = disponible ? "DISPONIBLE" : "NO_DISPONIBLE"
                     });
                 }
 

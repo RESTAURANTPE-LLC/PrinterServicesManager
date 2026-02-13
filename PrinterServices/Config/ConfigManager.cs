@@ -308,6 +308,12 @@ namespace PrinterServices.Config
                     Description = "Puerto UDP para descubrimiento de servicio",
                     Category = "network", ValueType = "int", MinValue = "1024", MaxValue = "65535"
                 },
+                new ConfigSettingEntity
+                {
+                    Key = "UdpDiscoveryEnabled", Value = "true", DefaultValue = "true",
+                    Description = "Habilitar/deshabilitar el servidor UDP Discovery",
+                    Category = "network", ValueType = "bool"
+                },
 
                 // ── Network Watcher (futuro) ──
                 new ConfigSettingEntity

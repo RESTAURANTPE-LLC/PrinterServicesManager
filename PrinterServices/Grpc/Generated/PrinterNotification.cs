@@ -33,11 +33,13 @@ namespace PrinterServices.Grpc {
             "ZRgHIAEoCRIRCgl0aW1lc3RhbXAYCCABKAkSEgoKcmVpbnRlbnRvcxgJIAEo",
             "BRIOCgZqb2JfaWQYCiABKAkiTgoWU3RhdHVzUHJpbnRlcnNSZXNwb25zZRI0",
             "CghwcmludGVycxgBIAMoCzIiLnByaW50ZXJzZXJ2aWNlcy5QcmludGVyU3Rh",
-            "dHVzSW5mbyKvAQoRUHJpbnRlclN0YXR1c0luZm8SFAoMaW1wcmVzb3JhX2lk",
+            "dHVzSW5mbyKJAgoRUHJpbnRlclN0YXR1c0luZm8SFAoMaW1wcmVzb3JhX2lk",
             "GAEgASgJEg4KBm5vbWJyZRgCIAEoCRIKCgJpcBgDIAEoCRIOCgZvbmxpbmUY",
             "BCABKAgSEwoLdGllbmVfcGFwZWwYBSABKAgSFAoMdGFwYV9hYmllcnRhGAYg",
             "ASgIEhQKDHVsdGltb19jaGVjaxgHIAEoCRIXCg9qb2JzX3BlbmRpZW50ZXMY",
-            "CCABKAUiBwoFRW1wdHkyxgIKE1ByaW50ZXJOb3RpZmljYXRpb24SbAofU3Vz",
+            "CCABKAUSIAoYZGlzcG9uaWJsZV9wYXJhX2ltcHJpbWlyGAkgASgIEhcKD2Vz",
+            "dGFkb19jb25leGlvbhgKIAEoCRIdChVlc3RhZG9fZGlzcG9uaWJpbGlkYWQY",
+            "CyABKAkiBwoFRW1wdHkyxgIKE1ByaW50ZXJOb3RpZmljYXRpb24SbAofU3Vz",
             "Y3JpYmlyTm90aWZpY2FjaW9uZXNTZXJ2aWRvchIjLnByaW50ZXJzZXJ2aWNl",
             "cy5TdXNjcmlwY2lvblJlcXVlc3QaIi5wcmludGVyc2VydmljZXMuTm90aWZp",
             "Y2FjaW9uRXZlbnQwARJrCh5TdXNjcmliaXJOb3RpZmljYWNpb25lc0NsaWVu",
@@ -52,7 +54,7 @@ namespace PrinterServices.Grpc {
             new pbr::GeneratedClrTypeInfo(typeof(global::PrinterServices.Grpc.SuscripcionRequest), global::PrinterServices.Grpc.SuscripcionRequest.Parser, new[]{ "DeviceId", "Ip", "Rol" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::PrinterServices.Grpc.NotificacionEvent), global::PrinterServices.Grpc.NotificacionEvent.Parser, new[]{ "Tipo", "ComandaId", "ImpresoraId", "ImpresoraNombre", "DeviceIdOrigen", "IpOrigen", "Mensaje", "Timestamp", "Reintentos", "JobId" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::PrinterServices.Grpc.StatusPrintersResponse), global::PrinterServices.Grpc.StatusPrintersResponse.Parser, new[]{ "Printers" }, null, null, null, null),
-            new pbr::GeneratedClrTypeInfo(typeof(global::PrinterServices.Grpc.PrinterStatusInfo), global::PrinterServices.Grpc.PrinterStatusInfo.Parser, new[]{ "ImpresoraId", "Nombre", "Ip", "Online", "TienePapel", "TapaAbierta", "UltimoCheck", "JobsPendientes" }, null, null, null, null),
+            new pbr::GeneratedClrTypeInfo(typeof(global::PrinterServices.Grpc.PrinterStatusInfo), global::PrinterServices.Grpc.PrinterStatusInfo.Parser, new[]{ "ImpresoraId", "Nombre", "Ip", "Online", "TienePapel", "TapaAbierta", "UltimoCheck", "JobsPendientes", "DisponibleParaImprimir", "EstadoConexion", "EstadoDisponibilidad" }, null, null, null, null),
             new pbr::GeneratedClrTypeInfo(typeof(global::PrinterServices.Grpc.Empty), global::PrinterServices.Grpc.Empty.Parser, null, null, null, null, null)
           }));
     }
@@ -1074,6 +1076,9 @@ namespace PrinterServices.Grpc {
       tapaAbierta_ = other.tapaAbierta_;
       ultimoCheck_ = other.ultimoCheck_;
       jobsPendientes_ = other.jobsPendientes_;
+      disponibleParaImprimir_ = other.disponibleParaImprimir_;
+      estadoConexion_ = other.estadoConexion_;
+      estadoDisponibilidad_ = other.estadoDisponibilidad_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -1122,6 +1127,9 @@ namespace PrinterServices.Grpc {
     /// <summary>Field number for the "online" field.</summary>
     public const int OnlineFieldNumber = 4;
     private bool online_;
+    /// <summary>
+    /// Conectividad TCP (responde a DLE EOT)
+    /// </summary>
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public bool Online {
@@ -1179,6 +1187,51 @@ namespace PrinterServices.Grpc {
       }
     }
 
+    /// <summary>Field number for the "disponible_para_imprimir" field.</summary>
+    public const int DisponibleParaImprimirFieldNumber = 9;
+    private bool disponibleParaImprimir_;
+    /// <summary>
+    /// online &amp;&amp; tiene_papel &amp;&amp; !tapa_abierta
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public bool DisponibleParaImprimir {
+      get { return disponibleParaImprimir_; }
+      set {
+        disponibleParaImprimir_ = value;
+      }
+    }
+
+    /// <summary>Field number for the "estado_conexion" field.</summary>
+    public const int EstadoConexionFieldNumber = 10;
+    private string estadoConexion_ = "";
+    /// <summary>
+    /// "ONLINE" o "OFFLINE" (siempre visible en JSON)
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public string EstadoConexion {
+      get { return estadoConexion_; }
+      set {
+        estadoConexion_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
+    /// <summary>Field number for the "estado_disponibilidad" field.</summary>
+    public const int EstadoDisponibilidadFieldNumber = 11;
+    private string estadoDisponibilidad_ = "";
+    /// <summary>
+    /// "DISPONIBLE" o "NO_DISPONIBLE" (siempre visible)
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
+    public string EstadoDisponibilidad {
+      get { return estadoDisponibilidad_; }
+      set {
+        estadoDisponibilidad_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     [global::System.CodeDom.Compiler.GeneratedCode("protoc", null)]
     public override bool Equals(object other) {
@@ -1202,6 +1255,9 @@ namespace PrinterServices.Grpc {
       if (TapaAbierta != other.TapaAbierta) return false;
       if (UltimoCheck != other.UltimoCheck) return false;
       if (JobsPendientes != other.JobsPendientes) return false;
+      if (DisponibleParaImprimir != other.DisponibleParaImprimir) return false;
+      if (EstadoConexion != other.EstadoConexion) return false;
+      if (EstadoDisponibilidad != other.EstadoDisponibilidad) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -1217,6 +1273,9 @@ namespace PrinterServices.Grpc {
       if (TapaAbierta != false) hash ^= TapaAbierta.GetHashCode();
       if (UltimoCheck.Length != 0) hash ^= UltimoCheck.GetHashCode();
       if (JobsPendientes != 0) hash ^= JobsPendientes.GetHashCode();
+      if (DisponibleParaImprimir != false) hash ^= DisponibleParaImprimir.GetHashCode();
+      if (EstadoConexion.Length != 0) hash ^= EstadoConexion.GetHashCode();
+      if (EstadoDisponibilidad.Length != 0) hash ^= EstadoDisponibilidad.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -1267,6 +1326,18 @@ namespace PrinterServices.Grpc {
         output.WriteRawTag(64);
         output.WriteInt32(JobsPendientes);
       }
+      if (DisponibleParaImprimir != false) {
+        output.WriteRawTag(72);
+        output.WriteBool(DisponibleParaImprimir);
+      }
+      if (EstadoConexion.Length != 0) {
+        output.WriteRawTag(82);
+        output.WriteString(EstadoConexion);
+      }
+      if (EstadoDisponibilidad.Length != 0) {
+        output.WriteRawTag(90);
+        output.WriteString(EstadoDisponibilidad);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -1309,6 +1380,18 @@ namespace PrinterServices.Grpc {
         output.WriteRawTag(64);
         output.WriteInt32(JobsPendientes);
       }
+      if (DisponibleParaImprimir != false) {
+        output.WriteRawTag(72);
+        output.WriteBool(DisponibleParaImprimir);
+      }
+      if (EstadoConexion.Length != 0) {
+        output.WriteRawTag(82);
+        output.WriteString(EstadoConexion);
+      }
+      if (EstadoDisponibilidad.Length != 0) {
+        output.WriteRawTag(90);
+        output.WriteString(EstadoDisponibilidad);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(ref output);
       }
@@ -1342,6 +1425,15 @@ namespace PrinterServices.Grpc {
       }
       if (JobsPendientes != 0) {
         size += 1 + pb::CodedOutputStream.ComputeInt32Size(JobsPendientes);
+      }
+      if (DisponibleParaImprimir != false) {
+        size += 1 + 1;
+      }
+      if (EstadoConexion.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeStringSize(EstadoConexion);
+      }
+      if (EstadoDisponibilidad.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeStringSize(EstadoDisponibilidad);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -1378,6 +1470,15 @@ namespace PrinterServices.Grpc {
       }
       if (other.JobsPendientes != 0) {
         JobsPendientes = other.JobsPendientes;
+      }
+      if (other.DisponibleParaImprimir != false) {
+        DisponibleParaImprimir = other.DisponibleParaImprimir;
+      }
+      if (other.EstadoConexion.Length != 0) {
+        EstadoConexion = other.EstadoConexion;
+      }
+      if (other.EstadoDisponibilidad.Length != 0) {
+        EstadoDisponibilidad = other.EstadoDisponibilidad;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -1426,6 +1527,18 @@ namespace PrinterServices.Grpc {
             JobsPendientes = input.ReadInt32();
             break;
           }
+          case 72: {
+            DisponibleParaImprimir = input.ReadBool();
+            break;
+          }
+          case 82: {
+            EstadoConexion = input.ReadString();
+            break;
+          }
+          case 90: {
+            EstadoDisponibilidad = input.ReadString();
+            break;
+          }
         }
       }
     #endif
@@ -1471,6 +1584,18 @@ namespace PrinterServices.Grpc {
           }
           case 64: {
             JobsPendientes = input.ReadInt32();
+            break;
+          }
+          case 72: {
+            DisponibleParaImprimir = input.ReadBool();
+            break;
+          }
+          case 82: {
+            EstadoConexion = input.ReadString();
+            break;
+          }
+          case 90: {
+            EstadoDisponibilidad = input.ReadString();
             break;
           }
         }

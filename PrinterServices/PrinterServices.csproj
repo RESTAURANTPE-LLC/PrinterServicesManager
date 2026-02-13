@@ -106,6 +106,7 @@
     <Compile Include="Grpc\PrinterNotificationServiceImpl.cs" />
     <Compile Include="Grpc\GrpcNotificationServer.cs" />
     <Compile Include="Notifications\NotificationManager.cs" />
+    <Compile Include="Discovery\UdpDiscoveryServer.cs" />
     <Compile Include="Data\Orm\PSQLite.cs" />
     <Compile Include="Data\PrinterServiceDb.cs" />
     <Compile Include="Data\Models\ConfigSettingEntity.cs" />

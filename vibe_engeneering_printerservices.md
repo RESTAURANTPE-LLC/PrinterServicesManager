@@ -436,6 +436,7 @@ message NotificacionEvent {
   string timestamp = 8;
   int32 reintentos = 9;
   string job_id = 10;
+  string pedido_ids = 11;       // ★ IDs de pedidos asociados "1772,1773" (ver acoplequipunet §10)
 }
 
 message StatusPrintersResponse {
@@ -466,10 +467,10 @@ Self-hosted con `System.Net.HttpListener` (incluido en .NET 4.5.2).
 
 | Método | Ruta | Descripción | Body/Response |
 |--------|------|-------------|---------------|
-| `POST` | `/api/print/comanda` | Enviar 1 comanda | `Impresion` → `{ jobId, aceptada }` |
-| `POST` | `/api/print/comandas` | Enviar lote de comandas | `List<Impresion>` → `{ jobIds[], count }` |
-| `POST` | `/api/print/venta` | Ticket de venta | `Impresion` → `{ jobId, aceptada }` |
-| `POST` | `/api/print/precuenta` | Precuenta | `Impresion` → `{ jobId, aceptada }` |
+| `POST` | `/api/print/comanda` | Enviar 1 comanda | `Impresion` → `{ status, jobs: [{ job_id, pedido_ids }] }` |
+| `POST` | `/api/print/comandas` | Enviar lote de comandas | `List<Impresion>` → `{ status, jobs: [{ job_id, pedido_ids }] }` |
+| `POST` | `/api/print/venta` | Ticket de venta | `Impresion` → `{ status, jobs: [{ job_id, pedido_ids }] }` |
+| `POST` | `/api/print/precuenta` | Precuenta | `Impresion` → `{ status, jobs: [{ job_id, pedido_ids }] }` |
 | `GET` | `/api/printer/status` | Estado de todas las impresoras | → `List<PrinterStatus>` |
 | `GET` | `/api/printer/status/{id}` | Estado de una impresora | → `PrinterStatus` |
 | `GET` | `/api/job/{jobId}` | Estado de un trabajo | → `PrintJobStatus` |
@@ -534,7 +535,9 @@ CREATE TABLE IF NOT EXISTS print_jobs (
     abre_gaveta         INTEGER DEFAULT 0,
     tipo_generacion     TEXT,           -- tipogeneracion de Impresion
     qr_data             TEXT,           -- datos para QR code
-    codigo_corte        TEXT            -- código de corte personalizado
+    codigo_corte        TEXT,           -- código de corte personalizado
+    pedido_ids          TEXT,           -- ★ IDs de pedidos asociados "1772,1773" (acoplequipunet §10)
+    cash_drawer_code    TEXT            -- ★ Código de cash drawer
 );
 
 CREATE TABLE IF NOT EXISTS print_log (
@@ -658,8 +661,11 @@ CREATE INDEX IF NOT EXISTS idx_printers_mac ON printers(mac_address);
 | **C** | ConfigManager centralizado (SQLite-backed, API REST) | GET/PUT /api/config, valores dinámicos sin reiniciar | ✅ DONE |
 | **4** | Cola persistente SQLite completa | Reiniciar servicio no pierde jobs pendientes | ✅ DONE |
 | **5** | gRPC NotificationManager | Servidor y Cliente reciben notificaciones push | ✅ DONE |
-| **6** | UDP Discovery | Servidor descubre PrinterServices automáticamente | PENDIENTE |
-| **7** | Feature flag en PrintUtil del Servidor | `USAR_PRINTER_SERVICE=true` → delega al servicio | PENDIENTE |
+| **6** | UDP Discovery | Servidor descubre PrinterServices automáticamente | ✅ DONE |
+| **7** | Integración QuipuNetX ↔ PrinterServices (ver `acoplequipunet.md`) | Camino A: strategies en backend, flag en controllers, retry, job_id↔pedido_ids | PENDIENTE |
+| **7A** | └─ Comandas (MVP): HtmlBitmapRenderer, PrinterServiceClient, ServerComandasStrategy | Comanda → PrinterServices → imprime → gRPC notifica | PENDIENTE |
+| **7B** | └─ Comprobantes: Server*Strategy para venta, delivery, factura, etc. | Todos los tipos de impresión delegados | PENDIENTE |
+| **7C** | └─ Secundarios: sorteo, encuesta, motorizado, reimpresión | Migración completa | PENDIENTE |
 | **8** | NetworkWatcher + alertas UI + MonitoreoRemoto | Cloud ve estado, POS muestra indicadores en tiempo real | PENDIENTE |
 
 ---
@@ -677,7 +683,11 @@ sourcecode/
 │       ├── entity/extras/Impresion.cs     ← Reutilizado por PrinterServices
 │       ├── entity/Impresora.cs            ← Reutilizado por PrinterServices
 │       ├── Util/Respuesta.cs              ← Reutilizado por PrinterServices
-│       ├── Util/print/PrintUtil.cs        ← Será modificado en Fase 7
+│       ├── Util/print/PrintUtil.cs        ← NO se modifica (Camino A: flag en Controllers)
+│       ├── Util/print/HtmlBitmapRenderer.cs ← Copiado a PrinterServices/Rendering/
+│       ├── controller/PedidoController.cs ← Fase 7: feature flag aquí
+│       ├── controller/VentaController.cs  ← Fase 7: feature flag aquí
+│       ├── Services/Print/PrinterServiceClient.cs ← NUEVO Fase 7
 │       └── sugar/Com/Orm/SugarDb.cs       ← Patrón para PrinterServiceDb
 │
 └── printerservices/        ★ ESTE PROYECTO NUEVO
@@ -687,20 +697,60 @@ sourcecode/
     └── (sub-proyectos...)
 ```
 
-### Modificación en Fase 7 (PrintUtil.cs del Servidor)
+### Modificación en Fase 7 — Camino A (ver `acoplequipunet.md` para diseño completo)
+
+> **IMPORTANTE**: La Fase 7 ya NO modifica `PrintUtil.cs`.
+> Las strategies de impresión se migran al backend (QuipuNetX).
+> El feature flag se evalúa en los **Controllers** (PedidoController, VentaController).
+> El diseño completo está en `vibe_engeneering_acoplequipunet.md`.
 
 ```csharp
-// Al inicio de imprimirComandasEthernet():
-if (FeatureFlagConfigReader.IsEnabled("USAR_PRINTER_SERVICE"))
+// PedidoController.addLista() — feature flag en el Controller, NO en PrintUtil:
+if (FeatureFlagConfigReader.IsEnabled("USAR_PRINTER_SERVICE") && Util.esModoServidor())
 {
-    var client = PrinterServiceClient.Instance;
-    var response = await client.EnviarComandasAsync(impresionComandasList);
-    if (OnPrintManagerResponse != null)
-        OnPrintManagerResponse(response);
-    return;
+    // Camino A: backend ejecuta la strategy y envía a PrinterServices
+    var strategy = new ServerComandasStrategy();
+    var respuesta = await strategy.EjecutarAsync(context);
+    // respuesta.Tipo = SUCCESS → "Imprimiendo comandas..." (jobs registrados)
+    // respuesta.Data = List<PrintJobResult> con job_id ↔ pedido_ids
+    return respuesta;
 }
-// ... código actual de impresión directa (fallback)
+// ... flujo actual (FLAG OFF o máquina cliente)
 ```
+
+### Cambios en PrinterServices para Fase 7A
+
+| Cambio | Archivo | Descripción |
+|--------|---------|-------------|
+| **NUEVO** | `Rendering/HtmlBitmapRenderer.cs` | Copia de QuipuNetX (465 líneas, solo cambio namespace) |
+| **NUEVO** | `Rendering/BitmapResizer.cs` | Método `ResizeIfNeeded(Bitmap, maxWidth)` |
+| **MOD** | `Queue/PrintJob.cs` | Campos: `PedidoIds`, `CashDrawerCode` |
+| **MOD** | `Data/Models/PrintJobEntity.cs` | Columnas correspondientes en SQLite |
+| **MOD** | `Api/Controllers/PrintController.cs` | Respuesta `{ status, jobs: [{ job_id, pedido_ids }] }` |
+| **MOD** | `Workers/PrintWorker.cs` | Renderizado HTML→Bitmap local (ver acoplequipunet §11.5) |
+| **MOD** | `Drivers/EscPosCommandBuilder.cs` | Método `AddBitmapFromImage(Bitmap)` |
+
+### Respuesta HTTP actualizada (Fase 7)
+
+```json
+// POST /api/print/comandas → Response 200
+{
+  "status": "OK",
+  "jobs": [
+    { "job_id": "714", "pedido_ids": ["1772", "1773"] },
+    { "job_id": "715", "pedido_ids": ["1771", "1774"] }
+  ]
+}
+```
+
+### Principios de la integración (definidos en `acoplequipunet.md`)
+
+- **PrinterServiceClient NUNCA lanza excepciones** → siempre retorna `Respuesta`
+- **2 intentos** (1 + 1 reintento) antes de declarar servicio no disponible
+- **Mensajes dinámicos** por strategy: "Imprimiendo comandas...", "Imprimiendo venta...", etc.
+- **SUCCESS ≠ impreso**: significa "jobs registrados en cola", resultado final llega por gRPC
+- **Trazabilidad**: `job_id ↔ pedido_ids` permite al Front saber qué pedidos fallaron
+- **HtmlBitmapRenderer LOCAL**: PrinterServices renderiza HTML→Bitmap, NO se envía base64
 
 ---
 
