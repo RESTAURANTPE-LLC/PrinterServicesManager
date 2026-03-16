@@ -1,0 +1,218 @@
+# Componente: Gestión de Impresiones (UtilesCabecera_New)
+
+## Ubicación
+
+| Capa | Archivo | Namespace |
+|------|---------|-----------|
+| **View (XAML)** | `QuipuNet/Xaml/NuevoDisenio/UtilesCabecera_New.xaml` (líneas 103-142) | `QuipuNet.Xaml.NuevoDisenio` |
+| **Code-behind** | `QuipuNet/Xaml/NuevoDisenio/UtilesCabecera_New.xaml.cs` | `QuipuNet.Xaml.NuevoDisenio` |
+| **ViewModel** | `QuipuNet/ViewModels/General/UtilesCabeceraViewModel.cs` | `QuipuNet.ViewModels.General` |
+| **Item Template** | `QuipuNet/Xaml/NuevoDisenio/OpcionesGenerales/ListItemHistorialImpresion.xaml(.cs)` | `QuipuNet.Xaml.NuevoDisenio.OpcionesGenerales` |
+| **Item ViewModel** | `QuipuNet/MainApp/NuevoDisenioQuipunet/ManagerImpresiones/PrinterCommandViewModel.cs` | `QuipuNet.MainApp.NuevoDisenioQuipunet.ManagerImpresiones` |
+| **Queue Manager** | `QuipuNetX/PrinterManager/FailedQueueManager.cs` | `QuipuNetX.PrinterManager` |
+
+---
+
+## Finalidad
+
+El componente **Gestión de Impresiones** es un panel desplegable (popup) integrado en la barra de cabecera principal de la aplicación. Su propósito es:
+
+1. **Notificar visualmente** al usuario cuando existen impresiones fallidas pendientes de reintento.
+2. **Listar las impresiones fallidas** con detalle (área de producción, impresora, fecha/hora, estado).
+3. **Permitir acciones** sobre cada impresión fallida: **Reintentar** o **Cancelar**.
+4. **Animar el botón** de impresora en la cabecera (parpadeo) cuando hay impresiones pendientes, para captar la atención del operador.
+
+---
+
+## Estructura visual (XAML)
+
+```
+Grid (GestionImpresionesVisibility)
+├── Border (brdCantImpresiones)        → Badge con contador de impresiones fallidas
+├── Border (btnGestionImpresiones)     → Botón icono de impresora (abre el popup)
+└── materialDesign:PopupBox (stackGestionImpresiones)
+    └── Grid (400x472)
+        ├── Row 0: ListBox (lbImpresiones)
+        │   └── ItemTemplate → ListItemHistorialImpresion
+        ├── Row 0: EmptyNew (emptyHistorialImpresionesFallidas) → Estado vacío
+        └── Row 1: Border → Link "Ir a configuración de impresoras"
+```
+
+### ListItemHistorialImpresion (cada item)
+
+```
+Border (borde coloreado según estado)
+├── Header
+│   ├── Icono + "Área de prod.: {AreaProduccion}"
+│   ├── Badge estado (En proceso | Completado | Error | Pendiente)
+│   ├── Botón ver detalle (colapsado)
+│   └── Botón eliminar (X rojo)
+├── Info
+│   ├── Icono impresora + {ImpresoraNombre}
+│   ├── Icono calendario + {Fecha}
+│   └── Icono reloj + {Hora}
+├── Expander "Ver productos" (colapsado)
+├── ProgressBar (visible solo durante reimpresión)
+└── Footer
+    ├── Botón "Cancelar"    → CancelarCommand
+    └── Botón "Reintentar"  → ReintentarCommand
+```
+
+---
+
+## Condición de activación
+
+El componente completo **solo es visible** cuando la configuración POS está activa:
+
+```csharp
+Util.estaConfiguracionActivadaPOS3(Definitions.CONFIGURACIONPOS_UTILIZAR_COLA_IMPRESIONES)
+```
+
+Si la configuración está desactivada, `GestionImpresionesVisibility = Collapsed` y no se suscriben eventos.
+
+---
+
+## Flujo de datos
+
+```
+                    ┌─────────────────────┐
+                    │  ImpresionService /  │
+                    │  PrinterQueueManager │
+                    └────────┬────────────┘
+                             │ (impresión falla)
+                             ▼
+                    ┌─────────────────────┐
+                    │  FailedQueueManager  │  (Singleton - QuipuNetX)
+                    │  - Add(command)      │
+                    │  - RemoveFailed()    │
+                    │  - RetrySingleAsync()│
+                    └────────┬────────────┘
+                             │ eventos: CommandAdded / CommandRemoved
+                             ▼
+              ┌──────────────────────────────┐
+              │  UtilesCabeceraViewModel      │  (Singleton - QuipuNet)
+              │  - AddFailedPrint(cmd)        │  → agrega PrinterCommandViewModel
+              │  - RemoveFailedPrint(cmd)     │  → remueve de ObservableCollection
+              │  - iniciarAnimacion()         │  → parpadeo en cabecera
+              │  - detenerAnimacion()         │  → detiene parpadeo
+              └──────────────┬───────────────┘
+                             │ Binding MVVM
+                             ▼
+              ┌──────────────────────────────┐
+              │  UtilesCabecera_New (View)    │
+              │  - PopupBox con ListBox       │
+              │  - Badge contador             │
+              │  - Storyboard parpadeo        │
+              └──────────────────────────────┘
+```
+
+---
+
+## Propiedades clave del ViewModel
+
+| Propiedad | Tipo | Descripción |
+|-----------|------|-------------|
+| `GestionImpresionesVisibility` | `Visibility` | Muestra/oculta todo el bloque |
+| `ContImpresiones` | `int` | Número mostrado en el badge |
+| `ImpresionesFallidas` | `ObservableCollection<PrinterCommandViewModel>` | Colección bindeada al ListBox |
+| `HasFailedPrints` | `bool` | `true` si hay items → muestra ListBox |
+| `ShowEmptyImpresiones` | `bool` | `true` si lista vacía → muestra empty state |
+| `IsPopupOpen` | `bool` | Controla apertura/cierre del PopupBox |
+
+---
+
+## PrinterCommandViewModel — Propiedades por item
+
+| Propiedad | Fuente | Descripción |
+|-----------|--------|-------------|
+| `AreaProduccion` | `IPrinterCommand.GetImpresion.Area` | Nombre del área de producción |
+| `ImpresoraNombre` | `IPrinterCommand.GetImpresion.Impresora` | Nombre de la impresora asignada |
+| `Fecha` / `Hora` | `IPrinterCommand.GetImpresion` | Timestamp de la impresión |
+| `EstadoTexto` | `Command.Estado` | "En proceso" / "Completado" / "Error" / "Pendiente" |
+| `Progreso` | Timer interno | 0-100% durante reintento |
+| `MostrarProgreso` | Estado = IMPRIMIENDO | Visibility del ProgressBar |
+| `ReintentarCommand` | `RelayCommand` | Inicia barra de progreso + `FailedQueueManager.RetrySingleFailedAsync` |
+| `CancelarCommand` | `RelayCommand` | `FailedQueueManager.RemoveFailed` |
+
+---
+
+## Animación de alerta
+
+Cuando hay impresiones fallidas, se activa un `Storyboard` llamado `AlertaParpadeoBtnImprimir` que hace parpadear el botón de impresora en la cabecera. La animación se gestiona vía interfaz `IAnimationController`:
+
+- **Inicio**: al agregar una impresión fallida (`AddFailedPrint`)
+- **Detención**: cuando la lista queda vacía (`RemoveFailedPrint`)
+- También se propaga a `ListaPedidos.getInstance()` (botón reimprimir en pantalla de pedidos)
+
+---
+
+## Flujos donde se usa la cola de impresiones
+
+El componente se alimenta indirectamente de todos los puntos de la aplicación que envían impresiones a través de `PrinterQueueManager` / `ImpresionService`. Los principales flujos que verifican `CONFIGURACIONPOS_UTILIZAR_COLA_IMPRESIONES` son:
+
+### 1. Pedidos en salón (`FragmentDetallePedidoPresenter`)
+- **Agregar pedido** → si hay `ImpresionList`, cada `Impresion` se envía a la cola
+- **Modificar pedido** → reimprime comandas modificadas
+- **Anular pedido** → imprime comanda de anulación
+- **Transferir pedido** → imprime comanda de transferencia
+- **Dividir pedido** → imprime comanda
+
+### 2. Pedidos delivery (`FragmentDetallePedidoDeliveryPresenter`)
+- **Agregar pedido delivery** → comandas a la cola
+
+### 3. Delivery confirmados (`DeliverysConfirmadosNewPresenter`)
+- **Confirmar delivery** → imprime comandas de confirmación
+
+### 4. Opciones item delivery (`FragmentOpcionesItemDeliveryNewPresenter`)
+- **Imprimir comandas** desde opciones de item
+
+### 5. Modal post-impresión (`UtilesCabeceraViewModel`)
+- Al terminar un batch de impresión (`HideProgress`), si hay fallidas → muestra `CustomModalImpresionFallidaNew` como toast (5 segundos en esquina inferior derecha)
+- Al iniciar un batch → muestra `CustomModalImprimiendoNewView` como indicador de progreso
+
+---
+
+## Vistas host
+
+El `UserControl` `UtilesCabecera_New` está embebido en las pantallas principales:
+
+| Vista | Archivo XAML |
+|-------|-------------|
+| Ventana principal | `Xaml/VentanaPrincipalview.xaml` |
+| Caja | `Xaml/CajaActivityView.xaml` |
+| Delivery principal | `Xaml/NuevoDisenio/DeliveryPantalla/DeliveryPrincipalNewView.xaml` |
+
+El componente se muestra en **todas las pantallas principales** de la aplicación como parte de la barra superior.
+
+---
+
+## Ciclo de vida
+
+```
+1. UserControl_Loaded
+   └── ConfigureImpresiones()
+       ├── SI config activa → mostrar botón, inicializar empty state, obtener Storyboard
+       └── NO config activa → Collapsed (no se muestra nada)
+
+2. ViewModel (Singleton) ← SubscribeToQueueEvents
+   ├── FailedQueueManager.CommandAdded → AddFailedPrint → actualiza lista + badge + animación
+   └── FailedQueueManager.CommandRemoved → RemoveFailedPrint → actualiza lista + badge + detiene animación
+
+3. Usuario click botón impresora → IsPopupOpen = true → PopupBox se abre
+   └── ListBox muestra ImpresionesFallidas con ListItemHistorialImpresion
+
+4. Usuario interactúa con item:
+   ├── "Reintentar" → ProgressBar visible + RetrySingleFailedAsync
+   │   ├── Éxito → RemoveFailed → se quita de la lista
+   │   └── Fallo → permanece en lista con estado "Error"
+   └── "Cancelar" → RemoveFailed → se quita de la lista sin reintentar
+
+5. UserControl_Unloaded
+   └── UnregisterAnimationController + Cleanup
+```
+
+---
+
+## Resumen
+
+El componente **Gestión de Impresiones** actúa como un **centro de notificaciones y gestión de errores de impresión** en tiempo real. Permite al operador del POS estar al tanto de cualquier fallo de impresión (comandas, boletas, etc.) y tomar acción inmediata (reintentar o descartar) sin abandonar la pantalla en la que se encuentre.

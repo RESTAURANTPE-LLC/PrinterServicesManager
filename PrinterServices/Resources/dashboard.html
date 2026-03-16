@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PrinterServices Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        .status-ONLINE { background-color: #10b981; }
+        .status-OFFLINE { background-color: #ef4444; }
+        .status-SIN_PAPEL { background-color: #f59e0b; }
+        .status-degraded { background-color: #f59e0b; }
+        .status-healthy { background-color: #10b981; }
+        .status-changed { background-color: #ef4444; }
+    </style>
+</head>
+<body class="bg-gray-900 text-white">
+    <div class="container mx-auto p-4">
+        <header class="mb-6">
+            <h1 class="text-4xl font-bold mb-2">🖨️ PrinterServices Dashboard</h1>
+            <p class="text-gray-400">Monitoreo en tiempo real — actualiza cada 3s</p>
+            <p class="text-sm text-gray-500">Última actualización: <span id="last-update">-</span></p>
+        </header>
+
+        <!-- Estado de Red -->
+        <section class="mb-6 bg-gray-800 p-4 rounded-lg">
+            <h2 class="text-2xl font-semibold mb-3">🌐 Estado de Red</h2>
+            <div id="network-status" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="text-gray-400">Cargando...</div>
+            </div>
+        </section>
+
+        <!-- Estadísticas Generales -->
+        <section class="mb-6 bg-gray-800 p-4 rounded-lg">
+            <h2 class="text-2xl font-semibold mb-3">📊 Estadísticas (24h)</h2>
+            <div id="stats" class="grid grid-cols-2 md:grid-cols-3 gap-4">
+                <div class="text-gray-400">Cargando...</div>
+            </div>
+        </section>
+
+        <!-- Cola de Impresión -->
+        <section class="mb-6 bg-gray-800 p-4 rounded-lg">
+            <h2 class="text-2xl font-semibold mb-3">📋 Cola de Impresión</h2>
+            <div id="queue-summary" class="flex gap-6 mb-4">
+                <div class="text-gray-400">Cargando...</div>
+            </div>
+            <div id="pending-jobs">
+                <div class="text-gray-400">Cargando...</div>
+            </div>
+        </section>
+
+        <!-- Impresoras -->
+        <section class="mb-6 bg-gray-800 p-4 rounded-lg">
+            <h2 class="text-2xl font-semibold mb-3">🖨️ Impresoras</h2>
+            <div id="printers" class="overflow-x-auto">
+                <div class="text-gray-400">Cargando...</div>
+            </div>
+        </section>
+
+        <!-- Gráfica de Latencias -->
+        <section class="mb-6 bg-gray-800 p-4 rounded-lg">
+            <h2 class="text-2xl font-semibold mb-3">⏱️ Latencias Recientes</h2>
+            <canvas id="latency-chart" width="400" height="150"></canvas>
+        </section>
+
+        <!-- Historial de Notificaciones (Callbacks) -->
+        <section class="mb-6 bg-gray-800 p-4 rounded-lg">
+            <h2 class="text-2xl font-semibold mb-3">📡 Historial de Notificaciones a Clientes</h2>
+            <p class="text-sm text-gray-400 mb-3">Callbacks HTTP enviados por PrinterServices a QuipuNetX (servidor y clientes)</p>
+            <div id="notif-table" class="overflow-x-auto mb-4">
+                <div class="text-gray-400">Cargando...</div>
+            </div>
+            <div id="notif-pagination" class="flex justify-center gap-2">
+                <!-- Botones de paginación de notificaciones -->
+            </div>
+        </section>
+
+        <!-- Historial de Impresiones -->
+        <section class="mb-6 bg-gray-800 p-4 rounded-lg">
+            <h2 class="text-2xl font-semibold mb-3">📜 Historial de Impresiones</h2>
+            <div id="history-table" class="overflow-x-auto mb-4">
+                <div class="text-gray-400">Cargando...</div>
+            </div>
+            <div id="pagination" class="flex justify-center gap-2">
+                <!-- Botones de paginación aquí -->
+            </div>
+        </section>
+    </div>
+
+    <!-- Modal de Detalle de Job -->
+    <div id="job-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50">
+        <div class="bg-gray-800 rounded-lg p-6 w-11/12 h-5/6 overflow-y-auto">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-2xl font-bold">📋 Detalle del Job</h2>
+                <button onclick="closeJobModal()" class="text-2xl hover:text-red-500">&times;</button>
+            </div>
+            <div id="job-detail" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <!-- Contenido del modal aquí -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal de Contenido de Impresión (Notificaciones) -->
+    <div id="notif-content-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50">
+        <div class="bg-gray-800 rounded-lg p-6 w-11/12 max-w-4xl max-h-[85vh] overflow-y-auto">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-2xl font-bold">🧾 Contenido de Impresión</h2>
+                <button onclick="closeNotifContentModal()" class="text-2xl hover:text-red-500">&times;</button>
+            </div>
+            <div id="notif-content-detail">
+                <!-- Contenido del modal aquí -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = window.location.origin + '/api/dashboard/data';
+        let latencyChart = null;
+        let currentPage = 1;
+        let currentNotifPage = 1;
+
+        // Formatear fecha ISO a formato legible: "23/02/2026 14:01:49"
+        function formatDate(isoStr) {
+            if (!isoStr) return '-';
+            try {
+                const d = new Date(isoStr);
+                if (isNaN(d.getTime())) return isoStr;
+                const dd = String(d.getDate()).padStart(2, '0');
+                const mm = String(d.getMonth() + 1).padStart(2, '0');
+                const yyyy = d.getFullYear();
+                const hh = String(d.getHours()).padStart(2, '0');
+                const mi = String(d.getMinutes()).padStart(2, '0');
+                const ss = String(d.getSeconds()).padStart(2, '0');
+                return `${dd}/${mm}/${yyyy} ${hh}:${mi}:${ss}`;
+            } catch (e) { return isoStr; }
+        }
+
+        // Eliminar un job por su ID
+        async function deleteJob(jobId) {
+            if (!confirm('¿Eliminar job ' + jobId.substring(0, 8) + '...?')) return;
+            try {
+                const resp = await fetch(window.location.origin + '/api/job/' + jobId, { method: 'DELETE' });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    alert('Error: ' + (err.error || 'HTTP ' + resp.status));
+                    return;
+                }
+                loadHistory(currentPage);
+                fetchDashboardData();
+            } catch (e) {
+                alert('Error eliminando job: ' + e.message);
+            }
+        }
+
+        // Inicializar Chart.js
+        function initChart() {
+            const ctx = document.getElementById('latency-chart').getContext('2d');
+            latencyChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'TCP Connect (ms)',
+                        data: [],
+                        backgroundColor: 'rgba(59, 130, 246, 0.5)'
+                    }, {
+                        label: 'Data Send (ms)',
+                        data: [],
+                        backgroundColor: 'rgba(16, 185, 129, 0.5)'
+                    }, {
+                        label: 'Total Print (ms)',
+                        data: [],
+                        backgroundColor: 'rgba(245, 158, 11, 0.5)'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        y: { beginAtZero: true, title: { display: true, text: 'Milisegundos' } }
+                    }
+                }
+            });
+        }
+
+        // Fetch datos del backend
+        async function fetchDashboardData() {
+            try {
+                const response = await fetch(API_URL);
+                const data = await response.json();
+                updateDashboard(data);
+            } catch (error) {
+                console.error('Error fetching dashboard data:', error);
+            }
+        }
+
+        // Actualizar dashboard
+        function updateDashboard(data) {
+            document.getElementById('last-update').textContent = new Date(data.timestamp).toLocaleTimeString();
+            
+            // Red
+            const netStatus = data.network.current;
+            document.getElementById('network-status').innerHTML = netStatus ? `
+                <div>
+                    <p class="text-sm text-gray-400">Gateway MAC</p>
+                    <p class="text-lg font-mono">${netStatus.gatewayMac || '-'}</p>
+                </div>
+                <div>
+                    <p class="text-sm text-gray-400">Network ID</p>
+                    <p class="text-lg">${netStatus.networkId || '-'}</p>
+                </div>
+                <div>
+                    <p class="text-sm text-gray-400">WiFi SSID</p>
+                    <p class="text-lg">${netStatus.wifiSsid || 'Ethernet'}</p>
+                </div>
+                <div>
+                    <p class="text-sm text-gray-400">Estado</p>
+                    <span class="px-3 py-1 rounded text-sm font-semibold status-${netStatus.healthStatus}">${netStatus.healthStatus}</span>
+                </div>
+            ` : '<p class="text-gray-400">Sin datos de red</p>';
+
+            // Stats
+            document.getElementById('stats').innerHTML = `
+                <div class="text-center">
+                    <p class="text-3xl font-bold text-green-400">${data.stats.exitosas24h}</p>
+                    <p class="text-sm text-gray-400">Exitosas</p>
+                </div>
+                <div class="text-center">
+                    <p class="text-3xl font-bold text-red-400">${data.stats.fallidas24h}</p>
+                    <p class="text-sm text-gray-400">Fallidas</p>
+                </div>
+                <div class="text-center">
+                    <p class="text-3xl font-bold text-yellow-400">${data.stats.esperando24h}</p>
+                    <p class="text-sm text-gray-400">Esperando</p>
+                </div>
+                <div class="text-center">
+                    <p class="text-3xl font-bold text-blue-400">${data.stats.total24h}</p>
+                    <p class="text-sm text-gray-400">Total</p>
+                </div>
+            `;
+
+            // Cola
+            document.getElementById('queue-summary').innerHTML = `
+                <div><span class="text-2xl font-bold text-blue-400">${data.queue.pending}</span> pendientes</div>
+                <div><span class="text-2xl font-bold text-yellow-400">${data.queue.waiting}</span> esperando</div>
+                <div><span class="text-2xl font-bold text-green-400">${data.queue.printing}</span> imprimiendo</div>
+            `;
+
+            if (data.queue.jobs.length > 0) {
+                document.getElementById('pending-jobs').innerHTML = `
+                    <table class="w-full text-sm">
+                        <thead class="bg-gray-700">
+                            <tr>
+                                <th class="p-2 text-left">Job ID</th>
+                                <th class="p-2 text-left">Impresora</th>
+                                <th class="p-2 text-left">Estado</th>
+                                <th class="p-2 text-left">Reintentos</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${data.queue.jobs.map(j => `
+                                <tr class="border-b border-gray-700">
+                                    <td class="p-2 font-mono text-xs">
+                                        <a href="#" onclick="showJobDetail('${j.jobId}'); return false;" 
+                                           class="text-blue-400 hover:text-blue-300 underline">
+                                            ${j.jobId.substring(0, 8)}
+                                        </a>
+                                    </td>
+                                    <td class="p-2 font-semibold">${j.impresoraNombre}</td>
+                                    <td class="p-2">${j.estado}</td>
+                                    <td class="p-2">${j.reintentos || 0}/${j.maxReintentos || 3}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                `;
+            } else {
+                document.getElementById('pending-jobs').innerHTML = '<p class="text-gray-400">✓ Cola vacía</p>';
+            }
+
+            // Impresoras
+            document.getElementById('printers').innerHTML = `
+                <table class="w-full text-sm">
+                    <thead class="bg-gray-700">
+                        <tr>
+                            <th class="p-2 text-left">Nombre</th>
+                            <th class="p-2 text-left">IP:Puerto</th>
+                            <th class="p-2 text-left">MAC</th>
+                            <th class="p-2 text-left">Estado</th>
+                            <th class="p-2 text-left">Disponible</th>
+                            <th class="p-2 text-left">Latencia Avg</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${data.printers.map(p => `
+                            <tr class="border-b border-gray-700">
+                                <td class="p-2 font-semibold">${p.nombre}</td>
+                                <td class="p-2 font-mono text-xs">${p.ip}:${p.puerto}</td>
+                                <td class="p-2 font-mono text-xs">${p.mac || '-'}</td>
+                                <td class="p-2">
+                                    <span class="px-2 py-1 rounded text-xs status-${p.estadoConexion}">${p.estadoConexion}</span>
+                                </td>
+                                <td class="p-2">${p.disponibleParaImprimir ? '✅' : '❌'}</td>
+                                <td class="p-2">
+                                    ${p.latencyStats && p.latencyStats.last24hAvgMs > 0 ? 
+                                        Math.round(p.latencyStats.last24hAvgMs) + 'ms' + (p.latencyStats.isDegraded ? ' ⚠️' : '') : 
+                                        '-'
+                                    }
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+
+            // Gráfica de latencias
+            if (latencyChart && data.recentLatencies.length > 0) {
+                latencyChart.data.labels = data.recentLatencies.reverse().map(l => 
+                    l.impresoraId.substring(0, 8));
+                latencyChart.data.datasets[0].data = data.recentLatencies.map(l => l.tcpConnectMs || 0);
+                latencyChart.data.datasets[1].data = data.recentLatencies.map(l => l.dataSendMs || 0);
+                latencyChart.data.datasets[2].data = data.recentLatencies.map(l => l.totalPrintMs || 0);
+                latencyChart.update();
+            }
+        }
+
+        // Función para abrir modal de job
+        async function showJobDetail(jobId) {
+            try {
+                const response = await fetch(window.location.origin + '/api/dashboard/job/' + jobId);
+                const job = await response.json();
+                
+                document.getElementById('job-detail').innerHTML = `
+                    <div class="bg-gray-700 p-4 rounded">
+                        <p class="text-sm text-gray-400">Job ID</p>
+                        <p class="text-lg font-mono">${job.jobId}</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded">
+                        <p class="text-sm text-gray-400">Comanda ID</p>
+                        <p class="text-lg">${job.comandaId || '-'}</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded">
+                        <p class="text-sm text-gray-400">Impresora</p>
+                        <p class="text-lg font-semibold">${job.impresoraNombre}</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded">
+                        <p class="text-sm text-gray-400">IP:Puerto</p>
+                        <p class="text-lg font-mono">${job.impresoraIp}:${job.puerto}</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded">
+                        <p class="text-sm text-gray-400">Estado</p>
+                        <p class="text-lg font-bold">${job.estado}</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded">
+                        <p class="text-sm text-gray-400">Reintentos</p>
+                        <p class="text-lg">${job.reintentos} / ${job.maxReintentos}</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded">
+                        <p class="text-sm text-gray-400">Tipo Impresión</p>
+                        <p class="text-lg">${job.tipoImpresion || '-'}</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded">
+                        <p class="text-sm text-gray-400">Copias</p>
+                        <p class="text-lg">${job.copias}</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded">
+                        <p class="text-sm text-gray-400">Modelo</p>
+                        <p class="text-lg">${job.modelo || '-'}</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded">
+                        <p class="text-sm text-gray-400">Device ID Origen</p>
+                        <p class="text-lg font-mono text-xs">${job.deviceIdOrigen || '-'}</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded">
+                        <p class="text-sm text-gray-400">IP Origen</p>
+                        <p class="text-lg">${job.ipOrigen || '-'}</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded">
+                        <p class="text-sm text-gray-400">Área Impresión</p>
+                        <p class="text-lg font-semibold text-yellow-300">${job.areaImpresion || '-'}</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded">
+                        <p class="text-sm text-gray-400">Fecha Creación</p>
+                        <p class="text-lg">${new Date(job.fechaCreacion).toLocaleString()}</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded col-span-2">
+                        <p class="text-sm text-gray-400">Error</p>
+                        <p class="text-sm text-red-400">${job.errorMensaje || 'Sin errores'}</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded col-span-2">
+                        <p class="text-sm text-gray-400 mb-2">Contenido (primeros 500 chars)</p>
+                        <pre class="text-xs bg-gray-900 p-2 rounded overflow-x-auto">${job.contenido ? job.contenido.substring(0, 500) : '-'}</pre>
+                    </div>
+                `;
+                
+                document.getElementById('job-modal').classList.remove('hidden');
+                document.getElementById('job-modal').classList.add('flex');
+            } catch (error) {
+                console.error('Error loading job detail:', error);
+            }
+        }
+        
+        function closeJobModal() {
+            document.getElementById('job-modal').classList.add('hidden');
+            document.getElementById('job-modal').classList.remove('flex');
+        }
+        
+        // Cargar historial paginado
+        async function loadHistory(page = 1) {
+            try {
+                const response = await fetch(window.location.origin + `/api/dashboard/history?page=${page}&limit=10`);
+                if (!response.ok) {
+                    const errData = await response.json().catch(() => ({}));
+                    throw new Error(errData.error || 'HTTP ' + response.status);
+                }
+                const data = await response.json();
+                currentPage = page;
+                
+                if (data.items.length > 0) {
+                    document.getElementById('history-table').innerHTML = `
+                        <table class="w-full text-sm">
+                            <thead class="bg-gray-700">
+                                <tr>
+                                    <th class="p-2 text-left">Job ID</th>
+                                    <th class="p-2 text-left">Impresora</th>
+                                    <th class="p-2 text-left">Área</th>
+                                    <th class="p-2 text-left">Estado</th>
+                                    <th class="p-2 text-left">Fecha</th>
+                                    <th class="p-2 text-left">Duración</th>
+                                    <th class="p-2 text-left">Acciones</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${data.items.map(h => `
+                                    <tr class="border-b border-gray-700">
+                                        <td class="p-2 font-mono text-xs">
+                                            <a href="#" onclick="showJobDetail('${h.jobId}'); return false;" 
+                                               class="text-blue-400 hover:text-blue-300 underline">
+                                                ${h.jobId.substring(0, 8)}
+                                            </a>
+                                        </td>
+                                        <td class="p-2">${h.impresoraNombre}</td>
+                                        <td class="p-2 text-xs">${h.areaImpresion || '-'}</td>
+                                        <td class="p-2"><span class="px-2 py-1 rounded text-xs ${h.estado === 'DONE' ? 'bg-green-600' : h.estado === 'FAILED' ? 'bg-red-600' : 'bg-yellow-600'}">${h.estado}</span></td>
+                                        <td class="p-2 text-xs">${formatDate(h.fecha)}</td>
+                                        <td class="p-2">${h.duracionMs ? h.duracionMs + 'ms' : '-'}</td>
+                                        <td class="p-2">
+                                            <button onclick="deleteJob('${h.jobId}')" 
+                                                class="px-2 py-1 bg-red-600 hover:bg-red-700 rounded text-xs" title="Eliminar job">
+                                                🗑️
+                                            </button>
+                                        </td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    `;
+                } else {
+                    document.getElementById('history-table').innerHTML = '<p class="text-gray-400">Sin historial</p>';
+                }
+                
+                // Paginación
+                let pagination = '';
+                if (page > 1) {
+                    pagination += `<button onclick="loadHistory(${page - 1})" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded">← Anterior</button>`;
+                }
+                pagination += `<span class="px-4 py-2">Página ${page} de ${data.totalPages}</span>`;
+                if (page < data.totalPages) {
+                    pagination += `<button onclick="loadHistory(${page + 1})" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded">Siguiente →</button>`;
+                }
+                document.getElementById('pagination').innerHTML = pagination;
+            } catch (error) {
+                console.error('Error loading history:', error);
+                document.getElementById('history-table').innerHTML = '<p class="text-red-400">Error cargando historial: ' + error.message + '</p>';
+            }
+        }
+        
+        // ─── Notificaciones (Callbacks) ────────────────────────────────────
+        // Cache local para contenido de notificaciones (evita re-fetch)
+        let notifCache = {};
+
+        function getEstadoEnvioBadge(estado) {
+            if (estado === 'ENVIADO') return '<span class="px-2 py-1 rounded text-xs bg-green-600">ENVIADO</span>';
+            if (estado === 'PENDIENTE') return '<span class="px-2 py-1 rounded text-xs bg-yellow-600 text-black">PENDIENTE</span>';
+            if (estado === 'FALLIDO') return '<span class="px-2 py-1 rounded text-xs bg-red-600">FALLIDO</span>';
+            return '<span class="px-2 py-1 rounded text-xs bg-gray-600">' + (estado || '-') + '</span>';
+        }
+
+        function getStatusJobBadge(status) {
+            if (status === 'DONE') return '<span class="px-2 py-1 rounded text-xs bg-green-600">DONE</span>';
+            if (status === 'FAILED') return '<span class="px-2 py-1 rounded text-xs bg-red-600">FAILED</span>';
+            if (status === 'WAITING') return '<span class="px-2 py-1 rounded text-xs bg-yellow-600 text-black">WAITING</span>';
+            if (status === 'EXPIRED') return '<span class="px-2 py-1 rounded text-xs bg-orange-600">EXPIRED</span>';
+            if (status === 'PRINTING') return '<span class="px-2 py-1 rounded text-xs bg-blue-600">PRINTING</span>';
+            if (status === 'CANCELLED') return '<span class="px-2 py-1 rounded text-xs bg-gray-500">CANCELLED</span>';
+            return '<span class="px-2 py-1 rounded text-xs bg-gray-600">' + (status || '-') + '</span>';
+        }
+
+        function showNotifContent(notifId) {
+            const item = notifCache[notifId];
+            if (!item) return;
+
+            const contenidoPreview = item.contenido
+                ? item.contenido.substring(0, 2000)
+                : '(Sin contenido disponible)';
+
+            document.getElementById('notif-content-detail').innerHTML = `
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div class="bg-gray-700 p-3 rounded">
+                        <p class="text-xs text-gray-400">Callback #</p>
+                        <p class="text-lg font-bold">${item.id}</p>
+                    </div>
+                    <div class="bg-gray-700 p-3 rounded">
+                        <p class="text-xs text-gray-400">Job ID</p>
+                        <p class="text-sm font-mono">${item.jobId || '-'}</p>
+                    </div>
+                    <div class="bg-gray-700 p-3 rounded">
+                        <p class="text-xs text-gray-400">Comanda</p>
+                        <p class="text-lg font-semibold text-yellow-300">${item.comandaId || '-'}</p>
+                    </div>
+                    <div class="bg-gray-700 p-3 rounded">
+                        <p class="text-xs text-gray-400">Impresora</p>
+                        <p class="text-lg">${item.impresoraNombre || '-'}</p>
+                    </div>
+                    <div class="bg-gray-700 p-3 rounded">
+                        <p class="text-xs text-gray-400">Área</p>
+                        <p class="text-lg">${item.areaImpresion || '-'}</p>
+                    </div>
+                    <div class="bg-gray-700 p-3 rounded">
+                        <p class="text-xs text-gray-400">Pedidos</p>
+                        <p class="text-sm">${item.pedidoIds || '-'}</p>
+                    </div>
+                    <div class="bg-gray-700 p-3 rounded">
+                        <p class="text-xs text-gray-400">Estado Job</p>
+                        <p class="mt-1">${getStatusJobBadge(item.statusJob)}</p>
+                    </div>
+                    <div class="bg-gray-700 p-3 rounded">
+                        <p class="text-xs text-gray-400">Estado Envío</p>
+                        <p class="mt-1">${getEstadoEnvioBadge(item.estadoEnvio)}</p>
+                    </div>
+                    <div class="bg-gray-700 p-3 rounded">
+                        <p class="text-xs text-gray-400">Destino</p>
+                        <p class="text-sm">${item.esCliente ? '💻' : '🖥️'} ${item.ipDestino} ${item.esCliente ? '(:8083 Cliente)' : '(:8081 Servidor)'}</p>
+                    </div>
+                    <div class="bg-gray-700 p-3 rounded">
+                        <p class="text-xs text-gray-400">Intentos</p>
+                        <p class="text-lg">${item.intentos}</p>
+                    </div>
+                    <div class="bg-gray-700 p-3 rounded">
+                        <p class="text-xs text-gray-400">Creado</p>
+                        <p class="text-sm">${formatDate(item.fechaCreacion)}</p>
+                    </div>
+                    <div class="bg-gray-700 p-3 rounded">
+                        <p class="text-xs text-gray-400">Enviado</p>
+                        <p class="text-sm">${item.fechaEnvio ? formatDate(item.fechaEnvio) : '-'}</p>
+                    </div>
+                </div>
+                ${item.error ? `<div class="bg-red-900 bg-opacity-30 p-3 rounded mb-4">
+                    <p class="text-xs text-gray-400 mb-1">Error del Job</p>
+                    <p class="text-sm text-red-400">${item.error}</p>
+                </div>` : ''}
+                ${item.ultimoError ? `<div class="bg-orange-900 bg-opacity-30 p-3 rounded mb-4">
+                    <p class="text-xs text-gray-400 mb-1">Último Error de Envío</p>
+                    <p class="text-sm text-orange-400">${item.ultimoError}</p>
+                </div>` : ''}
+                <div class="bg-gray-900 p-4 rounded">
+                    <p class="text-xs text-gray-400 mb-2">Contenido de Impresión (primeros 2000 chars)</p>
+                    <pre class="text-xs text-green-300 whitespace-pre-wrap break-all overflow-x-auto max-h-96 overflow-y-auto">${contenidoPreview}</pre>
+                </div>
+            `;
+
+            document.getElementById('notif-content-modal').classList.remove('hidden');
+            document.getElementById('notif-content-modal').classList.add('flex');
+        }
+
+        function closeNotifContentModal() {
+            document.getElementById('notif-content-modal').classList.add('hidden');
+            document.getElementById('notif-content-modal').classList.remove('flex');
+        }
+
+        async function loadNotifications(page = 1) {
+            try {
+                const response = await fetch(window.location.origin + `/api/dashboard/notifications?page=${page}&limit=50`);
+                if (!response.ok) {
+                    const errData = await response.json().catch(() => ({}));
+                    throw new Error(errData.error || 'HTTP ' + response.status);
+                }
+                const data = await response.json();
+                currentNotifPage = page;
+
+                // Cachear items para el modal de contenido
+                data.items.forEach(item => { notifCache[item.id] = item; });
+
+                if (data.items.length > 0) {
+                    document.getElementById('notif-table').innerHTML = `
+                        <table class="w-full text-sm">
+                            <thead class="bg-gray-700">
+                                <tr>
+                                    <th class="p-2 text-left">#</th>
+                                    <th class="p-2 text-left">Job ID</th>
+                                    <th class="p-2 text-left">Comanda</th>
+                                    <th class="p-2 text-left">Impresora</th>
+                                    <th class="p-2 text-left">Estado Job</th>
+                                    <th class="p-2 text-left">Destino</th>
+                                    <th class="p-2 text-left">Estado Envío</th>
+                                    <th class="p-2 text-left">Intentos</th>
+                                    <th class="p-2 text-left">Creado</th>
+                                    <th class="p-2 text-left">Acciones</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${data.items.map(n => `
+                                    <tr class="border-b border-gray-700 ${n.estadoEnvio === 'PENDIENTE' ? 'bg-yellow-900 bg-opacity-10' : ''} ${n.estadoEnvio === 'FALLIDO' ? 'bg-red-900 bg-opacity-10' : ''}">
+                                        <td class="p-2 text-xs text-gray-400">${n.id}</td>
+                                        <td class="p-2 font-mono text-xs">
+                                            <a href="#" onclick="showJobDetail('${n.jobId}'); return false;" 
+                                               class="text-blue-400 hover:text-blue-300 underline">
+                                                ${n.jobId ? n.jobId.substring(0, 8) : '-'}
+                                            </a>
+                                        </td>
+                                        <td class="p-2 text-xs font-semibold text-yellow-300">${n.comandaId || '-'}</td>
+                                        <td class="p-2 text-xs">${n.impresoraNombre || '-'}</td>
+                                        <td class="p-2">${getStatusJobBadge(n.statusJob)}</td>
+                                        <td class="p-2 text-xs">
+                                            ${n.esCliente ? '💻' : '🖥️'}
+                                            <span class="font-mono">${n.ipDestino || '-'}</span>
+                                        </td>
+                                        <td class="p-2">${getEstadoEnvioBadge(n.estadoEnvio)}</td>
+                                        <td class="p-2 text-center">${n.intentos}</td>
+                                        <td class="p-2 text-xs">${formatDate(n.fechaCreacion)}</td>
+                                        <td class="p-2">
+                                            <button onclick="showNotifContent(${n.id})" 
+                                                class="px-2 py-1 bg-indigo-600 hover:bg-indigo-700 rounded text-xs" title="Ver contenido de impresión">
+                                                🧾
+                                            </button>
+                                        </td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    `;
+                } else {
+                    document.getElementById('notif-table').innerHTML = '<p class="text-gray-400">Sin notificaciones registradas</p>';
+                }
+
+                // Paginación de notificaciones
+                let pag = '';
+                if (page > 1) {
+                    pag += `<button onclick="loadNotifications(${page - 1})" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 rounded">← Anterior</button>`;
+                }
+                pag += `<span class="px-4 py-2 text-gray-300">Página ${page} de ${data.totalPages} (${data.total} registros)</span>`;
+                if (page < data.totalPages) {
+                    pag += `<button onclick="loadNotifications(${page + 1})" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 rounded">Siguiente →</button>`;
+                }
+                document.getElementById('notif-pagination').innerHTML = pag;
+            } catch (error) {
+                console.error('Error loading notifications:', error);
+                document.getElementById('notif-table').innerHTML = '<p class="text-red-400">Error cargando notificaciones: ' + error.message + '</p>';
+            }
+        }
+
+        // Iniciar
+        initChart();
+        fetchDashboardData();
+        loadHistory(1);
+        loadNotifications(1);
+        setInterval(fetchDashboardData, 3000); // Actualizar cada 3s
+    </script>
+</body>
+</html>
