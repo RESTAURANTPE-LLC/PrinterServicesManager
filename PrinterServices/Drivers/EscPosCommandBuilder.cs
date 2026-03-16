@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace PrinterServices.Drivers
@@ -237,6 +240,58 @@ namespace PrinterServices.Drivers
         public EscPosCommandBuilder Cut(CutType cutType)
         {
             _commands.Add(_driver.GetCutCommand(cutType));
+            return this;
+        }
+
+        public EscPosCommandBuilder AddBitmapFromImage(Bitmap bmp)
+        {
+            if (bmp == null) return this;
+
+            BitmapData bmpData = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height),
+                ImageLockMode.ReadOnly, PixelFormat.Format1bppIndexed);
+
+            int width = bmp.Width;
+            int height = bmp.Height;
+            int bytesPerRow = (width + 7) / 8;
+
+            // GS v 0 m xL xH yL yH d1...dk
+            byte xL = (byte)(bytesPerRow % 256);
+            byte xH = (byte)(bytesPerRow / 256);
+            byte yL = (byte)(height % 256);
+            byte yH = (byte)(height / 256);
+
+            _commands.Add(new byte[] { 0x1D, 0x76, 0x30, 0x00, xL, xH, yL, yH });
+
+            int stride = bmpData.Stride;
+            IntPtr ptr = bmpData.Scan0;
+            byte[] data = new byte[stride * height];
+            Marshal.Copy(ptr, data, 0, data.Length);
+
+            for (int i = 0; i < height; i++)
+            {
+                byte[] rowBytes = new byte[bytesPerRow];
+                for (int j = 0; j < bytesPerRow; j++)
+                {
+                    byte b = 0x00;
+                    for (int bit = 0; bit < 8; bit++)
+                    {
+                        int x = j * 8 + bit;
+                        if (x < width)
+                        {
+                            int index = i * stride + (x / 8);
+                            bool black = (data[index] & (0x80 >> (x % 8))) == 0;
+                            if (black)
+                            {
+                                b |= (byte)(0x80 >> bit);
+                            }
+                        }
+                    }
+                    rowBytes[j] = b;
+                }
+                _commands.Add(rowBytes);
+            }
+
+            bmp.UnlockBits(bmpData);
             return this;
         }
 

@@ -171,6 +171,125 @@ namespace PrinterServices.Api.Controllers
             }
         }
 
+        /// <summary>
+        /// Sincroniza lista de impresoras desde QuipuNetX.
+        /// QuipuNetX envía su catálogo completo al iniciar el servidor.
+        /// Este endpoint inserta nuevas impresoras o actualiza las existentes.
+        /// </summary>
+        /// <param name="body">JSON array con lista de PrinterSyncDto</param>
+        /// <returns>SyncResponseDto con resultado de sincronización</returns>
+        public ApiResult SyncPrinters(string body)
+        {
+            try
+            {
+                // Validar que el body no esté vacío
+                if (string.IsNullOrEmpty(body))
+                {
+                    return ApiResult.BadRequest("Body vacío"); // Retornar error 400
+                }
+
+                // Deserializar JSON array a lista de DTOs
+                var printers = JsonConvert.DeserializeObject<System.Collections.Generic.List<PrinterSyncDto>>(body);
+
+                // Validar que el array no sea null o vacío
+                if (printers == null || printers.Count == 0)
+                {
+                    return ApiResult.BadRequest("Lista de impresoras vacía"); // Retornar error 400
+                }
+
+                int insertedCount = 0; // Contador de impresoras nuevas insertadas
+                int updatedCount = 0;  // Contador de impresoras existentes actualizadas
+
+                // Procesar cada impresora en el array
+                foreach (var dto in printers)
+                {
+                    // Validar campos obligatorios
+                    if (string.IsNullOrEmpty(dto.impresora_id))
+                    {
+                        Log.WarnFormat("[PRINTER-SYNC] Impresora sin ID, ignorando"); // Loguear warning
+                        continue; // Saltar a la siguiente impresora
+                    }
+
+                    if (string.IsNullOrEmpty(dto.ip))
+                    {
+                        Log.WarnFormat("[PRINTER-SYNC] Impresora {0} sin IP, ignorando", dto.impresora_id); // Loguear warning
+                        continue; // Saltar a la siguiente impresora
+                    }
+
+                    // Verificar si la impresora ya existe en la BD (por impresora_id)
+                    var existing = _db.Query<PrinterEntity>(
+                        "SELECT * FROM printers WHERE impresora_id = ?", dto.impresora_id).FirstOrDefault();
+
+                    if (existing != null)
+                    {
+                        // ═══════════════════════════════════════════════════════
+                        // ACTUALIZAR impresora existente
+                        // ═══════════════════════════════════════════════════════
+                        existing.Ip = dto.ip; // Actualizar IP
+                        existing.Nombre = dto.nombre ?? existing.Nombre; // Actualizar nombre (si viene)
+                        existing.Puerto = dto.puerto > 0 ? dto.puerto : existing.Puerto; // Actualizar puerto (si viene > 0)
+                        existing.MacAddress = dto.mac_address ?? existing.MacAddress; // Actualizar MAC (si viene)
+                        // NOTA: NO actualizar estado online/offline - eso lo maneja StatusMonitor
+
+                        _db.Update(existing); // Ejecutar UPDATE en BD
+                        updatedCount++; // Incrementar contador de actualizados
+
+                        Log.DebugFormat("[PRINTER-SYNC] Actualizada: {0} ({1}) → {2}", 
+                            dto.impresora_id, dto.nombre, dto.ip); // Log de actualización
+                    }
+                    else
+                    {
+                        // ═══════════════════════════════════════════════════════
+                        // INSERTAR impresora nueva
+                        // ═══════════════════════════════════════════════════════
+                        var newPrinter = new PrinterEntity
+                        {
+                            ImpresoraId = dto.impresora_id, // Asignar ID
+                            Nombre = dto.nombre ?? dto.impresora_id, // Asignar nombre (default = ID)
+                            Ip = dto.ip, // Asignar IP
+                            Puerto = dto.puerto > 0 ? dto.puerto : 9100, // Puerto (default 9100)
+                            MacAddress = dto.mac_address, // Asignar MAC
+                            ModoImpresion = "ethernet", // Default: ethernet (QuipuNetX envía solo modo SERVICIO = ethernet)
+                            FechaRegistro = DateTime.Now.ToString("o"), // Timestamp ISO 8601
+                            EstadoOnline = 0, // Default: offline (StatusMonitor lo actualizará)
+                            TienePapel = 1, // Default: asumimos que tiene papel
+                            TapaAbierta = 0, // Default: asumimos tapa cerrada
+                            IpResueltaPorArp = 0 // Default: no resuelta por ARP
+                        };
+
+                        _db.Insert(newPrinter); // Ejecutar INSERT en BD
+                        insertedCount++; // Incrementar contador de insertados
+
+                        Log.InfoFormat("[PRINTER-SYNC] Insertada: {0} ({1}) → {2}", 
+                            dto.impresora_id, dto.nombre, dto.ip); // Log de inserción
+                    }
+                }
+
+                // Crear respuesta exitosa con estadísticas
+                var response = SyncResponseDto.Success(insertedCount, updatedCount);
+
+                Log.InfoFormat("[PRINTER-SYNC] ✅ Sincronización completada: {0} impresoras ({1} nuevas, {2} actualizadas)", 
+                    response.synchronized, insertedCount, updatedCount); // Log de resumen
+
+                // Serializar DTO a JSON y retornar 200 OK
+                return ApiResult.Ok(JsonConvert.SerializeObject(response));
+            }
+            catch (JsonException jsonEx)
+            {
+                // Error de deserialización JSON
+                Log.Error("[PRINTER-SYNC] Error deserializando JSON", jsonEx);
+                var errorResponse = SyncResponseDto.Failure("JSON inválido: " + jsonEx.Message);
+                return ApiResult.BadRequest(JsonConvert.SerializeObject(errorResponse)); // Retornar 400
+            }
+            catch (Exception ex)
+            {
+                // Error inesperado
+                Log.Error("[PRINTER-SYNC] Error durante sincronización", ex);
+                var errorResponse = SyncResponseDto.Failure(ex.Message);
+                return ApiResult.Error(JsonConvert.SerializeObject(errorResponse)); // Retornar 500
+            }
+        }
+
         private static string GetString(JObject json, string key)
         {
             JToken token;

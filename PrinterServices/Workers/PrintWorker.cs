@@ -1,15 +1,19 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Threading;
 using System.Threading.Tasks;
 using log4net;
 using PrinterServices.Config;
 using PrinterServices.Drivers;
 using PrinterServices.Queue;
+using PrinterServices.Rendering;
 using PrinterServices.Transport;
 using PrinterServices.Data;
 using PrinterServices.Data.Models;
 using PrinterServices.Notifications;
+using PrinterServices.Core.Network;
+using PrinterServices.Services.Network;
 
 namespace PrinterServices.Workers
 {
@@ -20,11 +24,28 @@ namespace PrinterServices.Workers
         private readonly PrintJobManager _jobManager;
         private readonly PrinterServiceDb _db;
         private readonly CancellationTokenSource _cts;
+        private readonly ILatencyMeasurement _latencyMeasurement;
+        private readonly IDegradationDetector _degradationDetector;
+        private readonly INetworkHealthChecker _networkHealthChecker;
+        private readonly NetworkWatcher _networkWatcher;
+        private readonly JobStatusCallbackNotifier _callbackNotifier; // Fase 23: Notificador HTTP de estado de jobs a QuipuNetX
 
-        public PrintWorker(PrintJobManager jobManager, PrinterServiceDb db)
+        public PrintWorker(
+            PrintJobManager jobManager,
+            PrinterServiceDb db,
+            ILatencyMeasurement latencyMeasurement,
+            IDegradationDetector degradationDetector,
+            INetworkHealthChecker networkHealthChecker,
+            NetworkWatcher networkWatcher,
+            JobStatusCallbackNotifier callbackNotifier) // Fase 23: Recibir notificador de callbacks
         {
             _jobManager = jobManager;
             _db = db;
+            _latencyMeasurement = latencyMeasurement;
+            _degradationDetector = degradationDetector;
+            _networkHealthChecker = networkHealthChecker;
+            _networkWatcher = networkWatcher;
+            _callbackNotifier = callbackNotifier; // Fase 23: Guardar referencia al notificador
             _cts = new CancellationTokenSource();
         }
 
@@ -32,7 +53,12 @@ namespace PrinterServices.Workers
         {
             Task.Factory.StartNew(() => WorkLoop(_cts.Token), _cts.Token,
                 TaskCreationOptions.LongRunning, TaskScheduler.Default);
-            Log.Info("[WORKER] PrintWorker iniciado");
+            // Segundo loop: revisar periódicamente jobs WAITING en BD y expirarlos si superaron el tiempo
+            // RAZÓN: PrintWorker es responsable de las impresiones, incluyendo expirar jobs que
+            // quedaron en WAITING cuando la impresora está offline y nunca vuelve.
+            Task.Factory.StartNew(() => ExpirationLoop(_cts.Token), _cts.Token,
+                TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            Log.Info("[WORKER] PrintWorker iniciado (con loop de expiración)");
         }
 
         public void Stop()
@@ -72,42 +98,220 @@ namespace PrinterServices.Workers
             }
         }
 
+        /// <summary>
+        /// Loop periódico que revisa jobs WAITING en BD y los expira si superaron el tiempo configurado.
+        /// RAZÓN: PrintWorker es responsable de las impresiones. Cuando un job queda en WAITING
+        /// (impresora offline) y la impresora no vuelve, este loop lo detecta y lo marca EXPIRED.
+        /// Intervalo: cada 5 segundos revisa BD. Usa ExpirarImpresionDespuesDe de ConfigManager.
+        /// </summary>
+        private async Task ExpirationLoop(CancellationToken ct)
+        {
+            // Espera inicial: dejar que el servicio arranque completamente
+            await Task.Delay(10000, ct);
+
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    // Leer configuración de expiración (0 = desactivado)
+                    int expirarDespuesDe = ConfigManager.Instance.GetInt("ExpirarImpresionDespuesDe", 0);
+
+                    if (expirarDespuesDe > 0)                              // Solo si expiración está activada
+                    {
+                        // Consultar TODOS los jobs WAITING en BD
+                        var waitingJobs = _db.Query<PrintJobEntity>(
+                            "SELECT * FROM print_jobs WHERE estado = 'WAITING'");
+
+                        if (waitingJobs != null && waitingJobs.Count > 0)
+                        {
+                            int expiredCount = 0;                          // Contador de expirados
+
+                            foreach (var entity in waitingJobs)            // Iterar cada job WAITING
+                            {
+                                var job = PrintJob.FromEntity(entity);     // Convertir entidad a PrintJob
+                                double segundosTranscurridos = (DateTime.Now - job.FechaCreacion).TotalSeconds;
+
+                                if (segundosTranscurridos > expirarDespuesDe) // Superó el tiempo configurado
+                                {
+                                    // Construir mensaje descriptivo con tiempo real vs configurado
+                                    string expiredReason = string.Format(
+                                        "Tiempo de impresión expirado ({0}s de {1}s permitidos). Impresora offline.",
+                                        (int)segundosTranscurridos, expirarDespuesDe);
+
+                                    Log.WarnFormat("[WORKER-EXPIRATION] Job {0} → impresora {1} EXPIRADO ({2}s > {3}s)",
+                                        job.JobId, job.ImpresoraNombre ?? job.ImpresoraId,
+                                        (int)segundosTranscurridos, expirarDespuesDe);
+
+                                    _jobManager.MarkExpired(job, expiredReason);  // Marcar EXPIRED en BD
+                                    LogPrint(job, "EXPIRED", expiredReason);       // Registrar en print_log (evidencia)
+                                    // Notificar EXPIRED via gRPC → servidores + cliente origen
+                                    NotifyIfAvailable(n => n.NotifyPrintExpired(
+                                        job.JobId, job.ComandaId, job.ImpresoraId,
+                                        job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen, expiredReason));
+                                    // Callback HTTP a QuipuNetX → EXPIRED + motivo (fire-and-forget)
+                                    _callbackNotifier.NotifyStatusChangeFireAndForget(job, "EXPIRED", expiredReason);
+                                    expiredCount++;                        // Incrementar contador
+                                }
+                            }
+
+                            if (expiredCount > 0)                          // Loguear solo si hubo expirados
+                            {
+                                Log.WarnFormat("[WORKER-EXPIRATION] {0} job(s) WAITING expirado(s) (superaron {1}s)",
+                                    expiredCount, expirarDespuesDe);
+                            }
+                        }
+                    }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    break;                                                 // Shutdown solicitado → salir
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("[WORKER-EXPIRATION] Error en loop de expiración: " + ex.Message, ex);
+                }
+
+                // Esperar 5 segundos antes de la siguiente verificación
+                // RAZÓN: Suficientemente frecuente para detectar expiración rápido (config puede ser 10s),
+                // sin sobrecargar la BD con consultas constantes.
+                try { await Task.Delay(5000, ct); }
+                catch (OperationCanceledException) { break; }
+            }
+
+            Log.Info("[WORKER-EXPIRATION] Loop de expiración detenido");
+        }
+
         private async Task ProcessJobAsync(PrintJob job, CancellationToken ct)
         {
+            // FASE 8: Verificar salud de red — INFORMATIVO, no bloqueante
+            // RAZÓN: El estado "changed" NO debe bloquear por sí solo porque:
+            //   1. En instalación nueva (sin impresiones previas), no hay referencia de "red buena"
+            //   2. El usuario puede cambiar de red intencionalmente (a la correcta)
+            //   3. La verificación real de conectividad se hace con PrinterStatusChecker más abajo
+            // CRITERIO: Primero intentar imprimir. Si falla, el diagnóstico incluye info de red.
+            string networkStatus = _networkHealthChecker.GetCurrentNetworkStatus();
+            bool networkChanged = (networkStatus == "changed");
+            if (networkChanged)
+            {
+                // Solo advertir — la verificación de conectividad de impresora determinará si es alcanzable
+                Log.Warn($"[WORKER] Job {job.JobId} — Red cambió respecto a última impresión exitosa. Se intentará imprimir de todas formas.");
+            }
+
             var cfg = ConfigManager.Instance;
-            int port = job.Puerto > 0 ? job.Puerto : cfg.GetInt("DefaultPrinterPort", 9100);
             int connectTimeoutMs = cfg.GetInt("TcpConnectTimeoutMs", 3000);
 
-            // Pre-check: verificar si la impresora está online antes de intentar
+            // ═══════════════════════════════════════════════════════════════════
+            // RESOLUCIÓN MAC → IP: Obtener IP más actual desde tabla printers
+            // ═══════════════════════════════════════════════════════════════════
+            // RAZÓN: QuipuNet envía IP y MAC, pero la IP puede estar desactualizada.
+            //   - El ArpScanWorker/PrinterIpResolver mantiene printers.ip actualizada por MAC.
+            //   - mac_address es el identificador físico REAL (inmutable).
+            //   - ip es solo ubicación temporal en la red (puede cambiar por DHCP).
+            // CRITERIO: Consultar BD por ImpresoraId → si tiene IP más reciente, usarla.
+            string effectiveIp = job.ImpresoraIp; // IP original del job (viene de QuipuNet)
+            int port = job.Puerto > 0 ? job.Puerto : cfg.GetInt("DefaultPrinterPort", 9100);
+
+            try
+            {
+                // Buscar impresora en BD para obtener IP más actual (pudo ser resuelta por ARP)
+                var printerFromDb = _db.Table<Data.Models.PrinterEntity>()
+                    .FirstOrDefault(p => p.ImpresoraId == job.ImpresoraId);
+
+                if (printerFromDb != null)
+                {
+                    // Usar IP de la BD (actualizada por ArpScanWorker) en vez de la del job
+                    if (!string.IsNullOrEmpty(printerFromDb.Ip) && printerFromDb.Ip != effectiveIp)
+                    {
+                        Log.InfoFormat("[WORKER] Job {0} — IP resuelta por BD: {1} → {2} (MAC: {3}, arpResolved={4})",
+                            job.JobId, effectiveIp, printerFromDb.Ip, printerFromDb.MacAddress ?? "sin-mac",
+                            printerFromDb.IpResueltaPorArp);
+                        effectiveIp = printerFromDb.Ip; // Usar IP actualizada
+                    }
+
+                    // Actualizar puerto si la BD tiene uno diferente (más confiable)
+                    if (printerFromDb.Puerto > 0)
+                    {
+                        port = printerFromDb.Puerto;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Si falla la consulta a BD, continuar con la IP original del job
+                Log.Warn("[WORKER] Error consultando IP actualizada de BD, usando IP del job: " + ex.Message);
+            }
+
+            // FASE 8: Iniciar medición de latencias (con IP efectiva, no la original)
+            var timingBuilder = new LatencyTiming.Builder(
+                jobId: job.JobId,
+                impresoraId: job.ImpresoraId,
+                impresoraIp: effectiveIp,
+                enqueuedAt: job.FechaCreacion);
+            DateTime startedAt = DateTime.Now;
+            timingBuilder.Started(startedAt);
+
+            // Pre-check: verificar si la impresora está online (usando IP efectiva resuelta por MAC)
             var printerStatus = await Monitoring.PrinterStatusChecker.CheckAsync(
-                job.ImpresoraIp, port, connectTimeoutMs, ct);
+                effectiveIp, port, connectTimeoutMs, ct);
 
             if (!printerStatus.Online)
             {
-                Log.WarnFormat("[WORKER] Job {0} — impresora {1} ({2}) OFFLINE, moviendo a WAITING",
-                    job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, job.ImpresoraIp);
+                // RAZÓN: Si la impresora no es alcanzable Y la red cambió, enriquecer el mensaje
+                // para que el diagnóstico sea más útil (el usuario sabe que puede ser la red)
+                string offlineReason = networkChanged
+                    ? "Impresora offline (posible causa: cambio de red detectado). Verifique que esté en la red correcta."
+                    : "Impresora offline: " + (printerStatus.ErrorMessage ?? "sin conexión");
 
-                string offlineMsg = "Impresora offline: " + (printerStatus.ErrorMessage ?? "sin conexión");
-                _jobManager.MarkWaiting(job, offlineMsg);
-                LogPrint(job, "WAITING", "Impresora offline");
+                Log.WarnFormat("[WORKER] Job {0} — impresora {1} ({2}) OFFLINE{3}, moviendo a WAITING",
+                    job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, job.ImpresoraIp,
+                    networkChanged ? " [RED CAMBIADA]" : "");
+
+                _jobManager.MarkWaiting(job, offlineReason);
+                LogPrint(job, "WAITING", networkChanged ? "Impresora offline + red cambiada" : "Impresora offline");
                 // Notificar WAITING via gRPC → servidores + cliente origen
                 NotifyIfAvailable(n => n.NotifyPrintWaiting(
                     job.JobId, job.ComandaId, job.ImpresoraId,
-                    job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen, offlineMsg));
+                    job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen, offlineReason));
+                // Fase 23: Callback HTTP a QuipuNetX — notificar WAITING (fire-and-forget, no bloquea worker)
+                _callbackNotifier.NotifyStatusChangeFireAndForget(job, "WAITING", offlineReason);
                 return;
             }
 
             if (!printerStatus.TienePapel)
             {
-                Log.WarnFormat("[WORKER] Job {0} — impresora {1} SIN PAPEL, moviendo a WAITING",
+                // RAZÓN: Sin papel es un ERROR, no espera. El Front debe mostrar el modal de fallo con el motivo.
+                Log.WarnFormat("[WORKER] Job {0} — impresora {1} SIN PAPEL, marcando FAILED",
                     job.JobId, job.ImpresoraNombre ?? job.ImpresoraId);
 
-                _jobManager.MarkWaiting(job, "Sin papel");
-                LogPrint(job, "WAITING", "Sin papel");
-                // Notificar WAITING por sin papel via gRPC → servidores + cliente origen
-                NotifyIfAvailable(n => n.NotifyPrintWaiting(
+                _jobManager.MarkFailed(job, "Sin papel");                          // Marcar como FAILED con motivo
+                LogPrint(job, "FAILED", "Sin papel");                              // Log con estado FAILED
+                // Notificar FAILED por sin papel via gRPC → servidores + cliente origen
+                NotifyIfAvailable(n => n.NotifyPrintFailed(
                     job.JobId, job.ComandaId, job.ImpresoraId,
-                    job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen, "Sin papel"));
+                    job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen,
+                    "Sin papel", job.Reintentos));                                  // Motivo: Sin papel
+                // Fase 23: Callback HTTP a QuipuNetX — notificar FAILED sin papel (fire-and-forget)
+                _callbackNotifier.NotifyStatusChangeFireAndForget(job, "FAILED", "Sin papel");
+                return;
+            }
+
+            // RAZÓN: Verificar tapa abierta — si está abierta, la impresora acepta datos TCP
+            // pero los bufferiza y los imprime al cerrar, causando impresiones inesperadas.
+            // Es un ERROR, no espera: el Front debe mostrar el modal de fallo con el motivo.
+            if (printerStatus.TapaAbierta)
+            {
+                Log.WarnFormat("[WORKER] Job {0} — impresora {1} TAPA ABIERTA, marcando FAILED",
+                    job.JobId, job.ImpresoraNombre ?? job.ImpresoraId);
+
+                _jobManager.MarkFailed(job, "Tapa abierta");                       // Marcar como FAILED con motivo
+                LogPrint(job, "FAILED", "Tapa abierta");                           // Log con estado FAILED
+                // Notificar FAILED por tapa abierta via gRPC → servidores + cliente origen
+                NotifyIfAvailable(n => n.NotifyPrintFailed(
+                    job.JobId, job.ComandaId, job.ImpresoraId,
+                    job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen,
+                    "Tapa abierta", job.Reintentos));                               // Motivo: Tapa abierta
+                // Fase 23: Callback HTTP a QuipuNetX — notificar FAILED tapa abierta (fire-and-forget)
+                _callbackNotifier.NotifyStatusChangeFireAndForget(job, "FAILED", "Tapa abierta");
                 return;
             }
 
@@ -117,7 +321,7 @@ namespace PrinterServices.Workers
             // Construir payload ESC/POS
             byte[] payload = BuildPayload(driver, job);
 
-            // Enviar por cada copia
+            // Enviar por cada copia (FASE 8: medir solo primera copia para timing)
             for (int copia = 0; copia < job.Copias; copia++)
             {
                 if (job.Copias > 1)
@@ -125,20 +329,47 @@ namespace PrinterServices.Workers
                     Log.DebugFormat("[WORKER] Job {0} — copia {1}/{2}", job.JobId, copia + 1, job.Copias);
                 }
 
-                bool sent = await SendWithRetry(job, payload, ct);
+                bool sent = await SendWithRetryInstrumented(job, payload, effectiveIp, port, ct, copia == 0 ? timingBuilder : null);
                 if (!sent)
                 {
+                    // FASE 8: Registrar fallo en timing
+                    if (copia == 0)
+                    {
+                        var failedTiming = timingBuilder.Completed(DateTime.Now, false, "Envío falló después de reintentos").Build();
+                        _latencyMeasurement.RecordPrintLatency(failedTiming);
+                    }
                     return; // Ya se manejó el failure
                 }
             }
 
+            // FASE 8: Completar timing exitoso
+            DateTime completedAt = DateTime.Now;
+            var successTiming = timingBuilder.Completed(completedAt, true).Build();
+            _latencyMeasurement.RecordPrintLatency(successTiming);
+            _latencyMeasurement.UpdatePrinterStats(job.ImpresoraId);
+
+            // FASE 8: Detectar degradación de latencia
+            string degradationStatus = _degradationDetector.DetectDegradation(job.ImpresoraId, successTiming);
+            if (degradationStatus == "critical" || degradationStatus == "degraded")
+            {
+                Log.Warn($"[WORKER] Degradación detectada en {job.ImpresoraId}: {degradationStatus}");
+            }
+
+            // FASE 8: Registrar red actual como buena (impresión exitosa)
+            _networkWatcher.RecordSuccessfulPrint();
+
             // Éxito
             _jobManager.MarkDone(job);
-            LogPrint(job, "DONE", "Impresión completada");
+            string pedidoInfo = job.PedidoIds != null && job.PedidoIds.Count > 0
+                ? " [pedidos: " + string.Join(",", job.PedidoIds) + "]"
+                : "";
+            LogPrint(job, "DONE", "Impresión completada" + pedidoInfo);
             // Notificar éxito via gRPC → servidores + cliente origen
             NotifyIfAvailable(n => n.NotifyPrintSuccess(
                 job.JobId, job.ComandaId, job.ImpresoraId,
                 job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen));
+            // Fase 23: Callback HTTP a QuipuNetX — notificar DONE (fire-and-forget, no bloquea worker)
+            _callbackNotifier.NotifyStatusChangeFireAndForget(job, "DONE");
         }
 
         private byte[] BuildPayload(IPrinterDriver driver, PrintJob job)
@@ -154,39 +385,112 @@ namespace PrinterServices.Workers
                 }
             }
 
+            // Si tiene ContenidoHtml, renderizar HTML → Bitmap → ESC/POS raster
+            if (!string.IsNullOrEmpty(job.ContenidoHtml))
+            {
+                Log.DebugFormat("[WORKER] Job {0} — modo HTML→BITMAP", job.JobId);
+                var builder = new EscPosCommandBuilder(driver);
+                builder.Init();
+
+                using (Bitmap bmp = HtmlBitmapRenderer.RenderSimpleHtmlAsBitmap(job.ContenidoHtml))
+                using (Bitmap resized = BitmapResizer.ResizeIfNeeded(bmp, 576))
+                {
+                    builder.AddBitmapFromImage(resized);
+                }
+
+                // Abrir gaveta si se solicitó
+                if (job.AbreGaveta)
+                {
+                    builder.OpenCashDrawer();
+                }
+
+                builder.Cut(CutType.Partial);
+                return builder.Build();
+            }
+
             // Modo tradicional: cadena de texto plano
             Log.DebugFormat("[WORKER] Job {0} — modo CADENA", job.JobId);
-            var builder = new EscPosCommandBuilder(driver);
-            builder.Init();
+            var textBuilder = new EscPosCommandBuilder(driver);
+            textBuilder.Init();
 
             // Aplicar tamaño de letra si viene
             if (!string.IsNullOrEmpty(job.TamanioLetra))
             {
-                builder.SetLetterSize(job.TamanioLetra);
+                textBuilder.SetLetterSize(job.TamanioLetra);
             }
 
-            // Texto
-            if (!string.IsNullOrEmpty(job.Contenido))
+            // ─── Fase 7B: Renderizar cadena con soporte para QR (FE y encuesta) ───
+            // RAZÓN: imprimirVenta() en el Front busca ##FE## en cadena, split, imprime texto antes,
+            // genera QR ESC/POS, imprime texto después. PS replica el mismo comportamiento.
+            // imprimirEncuesta() usa BigWeightLetter + QR centrado. PS detecta via TipoImpresion o QrEncuesta.
+            string contenido = job.Contenido ?? "";
+            bool esEncuesta = !string.IsNullOrEmpty(job.QrEncuesta);                   // ¿Tiene QR de encuesta?
+            bool esFEConMarker = job.FacturacionElectronica                            // ¿FE con ##FE## marker?
+                && !string.IsNullOrEmpty(job.QrData)
+                && contenido.Contains("##FE##");
+
+            if (esEncuesta)
             {
-                builder.Text(job.Contenido);
+                // ─── Encuesta: BigWeightLetter + QR centrado (replica imprimirEncuesta) ───
+                textBuilder.SetFontSize(FontSize.DoubleWidthHeight);                   // BigWeightLetter = true
+                textBuilder.SetAlignment(Alignment.Center);                            // Centrar texto
+                textBuilder.Text(contenido);                                           // Texto de la encuesta
+                textBuilder.SetAlignment(Alignment.Left);                              // Reset alineación
+                textBuilder.SetFontSize(FontSize.Normal);                              // BigWeightLetter = false
+                textBuilder.SetAlignment(Alignment.Center);                            // Centrar QR
+                textBuilder.NewLine();                                                 // Salto antes del QR
+                int qrSize = ParseQrSize(job.TamanioQr, 4);                           // Tamaño QR (default 4)
+                textBuilder.PrintQrCode(job.QrEncuesta, qrSize, 1);                   // QR encuesta (ECC M)
+                textBuilder.SetAlignment(Alignment.Left);                              // Reset alineación
+            }
+            else if (esFEConMarker)
+            {
+                // ─── Venta FE: split cadena en ##FE##, insertar QR (replica imprimirVenta) ───
+                const string marker = "##FE##";
+                int idx = contenido.IndexOf(marker, StringComparison.Ordinal);
+                string textoAntes = contenido.Substring(0, idx);                       // Texto antes del QR
+                string textoDespues = contenido.Substring(idx + marker.Length);         // Texto después del QR
+
+                textBuilder.Text(textoAntes);                                          // Imprimir parte 1
+                textBuilder.NewLine();                                                 // Salto antes del QR
+                int qrSize = ParseQrSize(job.TamanioQr, 4);                           // Tamaño QR configurable
+                textBuilder.SetAlignment(Alignment.Center);                            // Centrar QR
+                textBuilder.PrintQrCode(job.QrData, qrSize, 1);                       // QR de facturación electrónica
+                textBuilder.SetAlignment(Alignment.Left);                              // Reset alineación
+
+                if (!string.IsNullOrEmpty(textoDespues))                               // Texto post-QR si existe
+                {
+                    textBuilder.Text(textoDespues);
+                }
+            }
+            else
+            {
+                // ─── Texto simple (comandas, precuentas, etc.) ───
+                if (!string.IsNullOrEmpty(contenido))
+                {
+                    textBuilder.Text(contenido);
+                }
             }
 
             // Abrir gaveta si se solicitó
             if (job.AbreGaveta)
             {
-                builder.OpenCashDrawer();
+                textBuilder.OpenCashDrawer();
             }
 
             // Corte
-            builder.Cut(CutType.Partial);
+            textBuilder.Cut(CutType.Partial);
 
-            return builder.Build();
+            return textBuilder.Build();
         }
 
-        private async Task<bool> SendWithRetry(PrintJob job, byte[] payload, CancellationToken ct)
+        /// <summary>
+        /// Envía payload a la impresora con reintentos exponenciales.
+        /// RAZÓN: Recibe effectiveIp y port ya resueltos por MAC (no confiar en job.ImpresoraIp que puede estar desactualizada).
+        /// </summary>
+        private async Task<bool> SendWithRetryInstrumented(PrintJob job, byte[] payload, string effectiveIp, int port, CancellationToken ct, LatencyTiming.Builder timingBuilder)
         {
             var cfg = ConfigManager.Instance;
-            int port = job.Puerto > 0 ? job.Puerto : cfg.GetInt("DefaultPrinterPort", 9100);
             int maxRetries = cfg.GetInt("MaxRetries", 3);
             int retryBackoffBaseMs = cfg.GetInt("RetryBackoffBaseMs", 500);
 
@@ -200,12 +504,26 @@ namespace PrinterServices.Workers
                     await Task.Delay(backoff, ct);
                 }
 
-                using (var transport = new TcpTransport(job.ImpresoraIp, port))
+                using (var transport = new TcpTransport(effectiveIp, port))
                 {
                     try
                     {
+                        // FASE 8: Medir TCP connect
+                        DateTime beforeConnect = DateTime.Now;
                         await transport.ConnectAsync(ct);
+                        if (timingBuilder != null)
+                        {
+                            timingBuilder.TcpConnected(DateTime.Now);
+                        }
+
+                        // FASE 8: Medir envío de datos
+                        DateTime beforeSend = DateTime.Now;
                         await transport.SendAsync(payload, ct);
+                        if (timingBuilder != null)
+                        {
+                            timingBuilder.DataSent(DateTime.Now, payload.Length);
+                        }
+
                         transport.Disconnect();
 
                         Log.DebugFormat("[WORKER] Job {0} — datos enviados ({1} bytes)", job.JobId, payload.Length);
@@ -252,6 +570,8 @@ namespace PrinterServices.Workers
                     job.JobId, job.ComandaId, job.ImpresoraId,
                     job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen,
                     error, job.Reintentos));
+                // Fase 23: Callback HTTP a QuipuNetX — notificar FAILED (fire-and-forget, no bloquea worker)
+                _callbackNotifier.NotifyStatusChangeFireAndForget(job, "FAILED", error);
             }
         }
 
@@ -279,6 +599,22 @@ namespace PrinterServices.Workers
             }
         }
 
+        /// <summary>
+        /// Parsea el tamaño de QR desde string a int.
+        /// RAZÓN: QuipuNet envía impresora_tamanioqr como string (ej: "3", "5").
+        /// El Front usa configurarTamanoQr() que mapea estos valores a moduleSize del ESC/POS.
+        /// </summary>
+        private static int ParseQrSize(string tamanioQr, int defaultSize)
+        {
+            if (string.IsNullOrEmpty(tamanioQr)) return defaultSize;         // Sin config → default
+            int size;
+            if (int.TryParse(tamanioQr, out size) && size >= 1 && size <= 16)
+            {
+                return size;                                                  // Valor válido 1-16
+            }
+            return defaultSize;                                               // Valor inválido → default
+        }
+
         private void LogPrint(PrintJob job, string estado, string mensaje)
         {
             try
@@ -293,7 +629,8 @@ namespace PrinterServices.Workers
                     Mensaje = mensaje,
                     Reintentos = job.Reintentos,
                     Fecha = DateTime.Now.ToString("o"),
-                    DeviceIdOrigen = job.DeviceIdOrigen
+                    DeviceIdOrigen = job.DeviceIdOrigen,
+                    AreaImpresion = job.AreaImpresion // Área de producción para trazabilidad
                 };
                 _db.Insert(log);
             }

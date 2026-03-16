@@ -35,5 +35,8 @@ namespace PrinterServices.Data.Models
 
         [Column("device_id_origen")]
         public string DeviceIdOrigen { get; set; }
+
+        [Column("area_impresion")]
+        public string AreaImpresion { get; set; } // Área de producción (ej: "COCINA AUXILIAR", "BARRA")
     }
 }

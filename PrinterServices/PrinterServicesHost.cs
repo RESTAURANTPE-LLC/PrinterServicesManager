@@ -9,6 +9,7 @@ using PrinterServices.Notifications;
 using PrinterServices.Queue;
 using PrinterServices.Discovery;
 using PrinterServices.Workers;
+using PrinterServices.Services.Network;
 
 namespace PrinterServices
 {
@@ -21,10 +22,13 @@ namespace PrinterServices
         private ConfigManager _configManager;
         private PrintJobManager _jobManager;
         private PrintWorker _printWorker;
+        private ArpScanWorker _arpWorker;             // Worker independiente para búsquedas ARP (proceso paralelo)
+        private NotificationRetryWorker _notifRetryWorker; // Worker para reintentar notificaciones a QuipuNetX
         private StatusMonitor _statusMonitor;
         private NotificationManager _notifManager;
         private GrpcNotificationServer _grpcServer;
         private UdpDiscoveryServer _udpDiscovery;     // Fase 6: auto-descubrimiento UDP
+        private NetworkWatcher _networkWatcher;       // Fase 8: monitoreo bidireccional de red
 
         public void Start()
         {
@@ -47,10 +51,28 @@ namespace PrinterServices
                 _jobManager.RecoverPending();
                 Log.Info("[QUEUE] Cola de impresión inicializada");
 
-                // 4. Inicializar worker de impresión
-                _printWorker = new PrintWorker(_jobManager, _db);
+                // 4. Inicializar servicios SOLID para Fase 8 (monitoreo de red y latencias)
+                // RAZÓN: Instanciar antes de PrintWorker (que los necesita como dependencias)
+                var networkConfigCapture = new NetworkConfigCapture();
+                var networkSnapshotManager = new NetworkSnapshotManager(_db);
+                var networkHealthChecker = new NetworkHealthChecker(_db);
+                var latencyMeasurement = new LatencyMeasurement(_db);
+                var degradationDetector = new DegradationDetector(_db);
+
+                // 4.1. Inicializar NetworkWatcher con dependencias inyectadas (DIP)
+                _networkWatcher = new NetworkWatcher(_db, networkConfigCapture, 
+                    networkSnapshotManager, networkHealthChecker);
+                _networkWatcher.Start();
+                Log.Info("[NET-WATCHER] NetworkWatcher iniciado (monitoreo bidireccional)");
+
+                // 4.2. Fase 23: Crear notificador de callbacks de estado de jobs para QuipuNetX
+                var jobStatusCallbackNotifier = new Notifications.JobStatusCallbackNotifier(_db, _configManager);
+
+                // 4.3. Inicializar worker de impresión con servicios de Fase 8 + Fase 23 inyectados
+                _printWorker = new PrintWorker(_jobManager, _db, latencyMeasurement,
+                    degradationDetector, networkHealthChecker, _networkWatcher, jobStatusCallbackNotifier);
                 _printWorker.Start();
-                Log.Info("[WORKER] Worker de impresión iniciado");
+                Log.Info("[WORKER] Worker de impresión iniciado (con instrumentación de latencias)");
 
                 // 5. Inicializar HTTP API
                 int httpPort = _configManager.GetInt("HttpPort", 8090);
@@ -58,32 +80,70 @@ namespace PrinterServices
                 _httpApiServer.Start();
                 Log.InfoFormat("[HTTP] Servidor escuchando en puerto {0}", httpPort);
 
-                // 6. Inicializar StatusMonitor (DLE EOT)
-                _statusMonitor = new StatusMonitor(_db, _jobManager);
+                // 6. Inicializar ArpScanWorker (proceso paralelo para búsquedas ARP)
+                // ARQUITECTURA: Corre en hilo independiente, NO bloquea StatusMonitor
+                // StatusMonitor delega búsquedas ARP (~500ms) a este worker
+                // Si impresora vuelve online → StatusMonitor cancela búsqueda en progreso
+                _arpWorker = new ArpScanWorker(_db);
+                _arpWorker.Start();
+                Log.Info("[ARP-WORKER] Worker de búsqueda ARP iniciado (event-driven)");
+
+                // 6.1. Inicializar NotificationRetryWorker (sincronización con QuipuNetX)
+                // Reintenta enviar notificaciones de cambio de IP pendientes cada N segundos
+                // Si QuipuNetX está offline cuando se detecta cambio de IP, se persiste en BD
+                // Este worker reintenta automáticamente hasta que QuipuNetX responda
+                _notifRetryWorker = new NotificationRetryWorker(_db, _configManager);
+                _notifRetryWorker.Start();
+                Log.Info("[NOTIF-RETRY] Worker de reintentos de notificaciones iniciado");
+
+                // 7. Inicializar servicios SOLID para monitoreo de impresoras (PRINCIPIO DIP)
+                // RAZÓN: StatusMonitor depende de abstracciones, no de implementaciones concretas
+                // BENEFICIO: Testing con mocks, intercambiabilidad, mantenibilidad
+                
+                // 7.1. Instanciar servicio de enriquecimiento de MACs (SRP)
+                // RESPONSABILIDAD: Obtener MAC vía ARP y normalizar formatos
+                var macEnricher = new Services.Printers.PrinterMacEnricher(_db);
+                
+                // 7.2. Instanciar servicio de agrupamiento por dispositivo físico (SRP)
+                // RESPONSABILIDAD: Agrupar impresoras con misma MAC (BARRA, BARRA 2)
+                var deviceGrouper = new Services.Printers.PhysicalDeviceGrouper();
+                
+                // 7.3. Instanciar servicio de sincronización de estado (SRP)
+                // RESPONSABILIDAD: Propagar estado entre impresoras del mismo dispositivo
+                var stateSync = new Services.Printers.PrinterStateSync(_db);
+                
+                // 7.4. Inicializar StatusMonitor con dependencias inyectadas (DIP)
+                // RAZÓN: Recibe todas las dependencias desde fuera, no las crea internamente
+                _statusMonitor = new StatusMonitor(_db, _jobManager, _arpWorker, 
+                    macEnricher, deviceGrouper, stateSync, jobStatusCallbackNotifier);
                 _statusMonitor.Start();
 
-                // 7. Inicializar NotificationManager (dispatcher central de notificaciones)
+                // 7.5. Enlazar NetworkWatcher → StatusMonitor para trigger inmediato
+                // RAZÓN: Cuando NetworkWatcher detecta transición changed→healthy (red volvió),
+                // despierta a StatusMonitor para re-verificar impresoras sin esperar intervalo de 3s.
+                _networkWatcher.SetStatusMonitor(_statusMonitor);
+                Log.Info("[HOST] NetworkWatcher enlazado con StatusMonitor (reconexión rápida habilitada)");
+
+                // 8. Inicializar NotificationManager (dispatcher central de notificaciones)
                 // Singleton que gestiona suscriptores gRPC y difunde eventos de impresión/estado.
                 // Debe inicializarse ANTES del gRPC server y DESPUÉS de la BD.
                 _notifManager = NotificationManager.GetInstance(_db);
                 Log.Info("[NOTIF] NotificationManager inicializado");
 
-                // 8. Inicializar gRPC server (Grpc.Core 2.46.6, puerto configurable)
+                // 9. Inicializar gRPC server (Grpc.Core 2.46.6, puerto configurable)
                 // Expone 3 RPCs: SuscribirNotificacionesServidor, SuscribirNotificacionesCliente, GetStatusPrinters
                 // Los Quipunet.exe (Servidor y Clientes) se conectan aquí para recibir notificaciones push.
                 _grpcServer = new GrpcNotificationServer(_db, _notifManager, _jobManager);
                 _grpcServer.Start(); // Abre socket en GrpcBindAddress:GrpcPort (default 0.0.0.0:50051)
                 int grpcPort = _configManager.GetInt("GrpcPort", 50051);
 
-                // 9. Inicializar UDP Discovery Server (auto-descubrimiento en red local)
+                // 10. Inicializar UDP Discovery Server (auto-descubrimiento en red local)
                 // Quipunet.exe envía broadcast "QUIPU_PRINTER_DISCOVERY" en UDP 9999.
                 // PrinterServices responde unicast con IP|HttpPort|GrpcPort.
                 // Configurable: UdpDiscoveryEnabled (bool), UdpDiscoveryPort (int).
                 _udpDiscovery = new UdpDiscoveryServer();
                 _udpDiscovery.Start();
                 int udpPort = _configManager.GetInt("UdpDiscoveryPort", 9999);
-
-                // TODO Fase 8: NetworkWatcher (proceso paralelo)
 
                 Log.Info("═══════════════════════════════════════════════");
                 Log.Info("  PrinterServices — Listo");
@@ -123,6 +183,27 @@ namespace PrinterServices
                 {
                     _statusMonitor.Stop();
                     Log.Info("[MONITOR] StatusMonitor detenido");
+                }
+
+                // Detener ArpScanWorker (cancela búsquedas activas y cierra hilo)
+                if (_arpWorker != null)
+                {
+                    _arpWorker.Stop();
+                    Log.Info("[ARP-WORKER] Worker de búsqueda ARP detenido");
+                }
+
+                // Detener NotificationRetryWorker (detiene reintentos de notificaciones a QuipuNetX)
+                if (_notifRetryWorker != null)
+                {
+                    _notifRetryWorker.Stop();
+                    Log.Info("[NOTIF-RETRY] Worker de reintentos de notificaciones detenido");
+                }
+
+                // Detener NetworkWatcher (Fase 8: cancela monitoreo de red)
+                if (_networkWatcher != null)
+                {
+                    _networkWatcher.Stop();
+                    Log.Info("[NET-WATCHER] NetworkWatcher detenido");
                 }
 
                 // Detener UDP Discovery (cancela el loop de escucha)

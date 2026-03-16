@@ -30,9 +30,13 @@
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
   <ItemGroup>
+    <Reference Include="SnmpSharpNet, Version=0.9.7.0, Culture=neutral, PublicKeyToken=b2181aa3b9571feb, processorArchitecture=MSIL">
+      <HintPath>..\packages\SnmpSharpNet.0.9.7\lib\SnmpSharpNet.dll</HintPath>
+    </Reference>
     <Reference Include="System" />
     <Reference Include="System.Core" />
     <Reference Include="System.Configuration" />
+    <Reference Include="System.Drawing" />
     <Reference Include="System.Net" />
     <Reference Include="System.Net.Http" />
     <Reference Include="System.Runtime.Serialization" />
@@ -84,6 +88,7 @@
     <Compile Include="Api\Controllers\PrintController.cs" />
     <Compile Include="Api\Controllers\JobController.cs" />
     <Compile Include="Api\Controllers\PrinterController.cs" />
+    <Compile Include="Api\Controllers\DashboardController.cs" />
     <Compile Include="Queue\PrintJob.cs" />
     <Compile Include="Queue\PrintJobManager.cs" />
     <Compile Include="Drivers\IPrinterDriver.cs" />
@@ -97,6 +102,7 @@
     <Compile Include="Transport\ITransport.cs" />
     <Compile Include="Transport\TcpTransport.cs" />
     <Compile Include="Workers\PrintWorker.cs" />
+    <Compile Include="Workers\ArpScanWorker.cs" />
     <Compile Include="Monitoring\PrinterStatusChecker.cs" />
     <Compile Include="Monitoring\StatusMonitor.cs" />
     <Compile Include="Config\ConfigManager.cs" />
@@ -115,13 +121,60 @@
     <Compile Include="Data\Models\PrinterEntity.cs" />
     <Compile Include="Data\Models\NotificationEntity.cs" />
     <Compile Include="Data\Models\NetworkConfigEntity.cs" />
+    <Compile Include="Data\Models\IpChangeNotificationEntity.cs" />
+    <Compile Include="Data\Models\NetworkSnapshotEntity.cs" />
+    <Compile Include="Data\Models\NetworkCurrentEntity.cs" />
+    <Compile Include="Data\Models\NetworkAlertEntity.cs" />
+    <Compile Include="Data\Models\PrintLatencyLogEntity.cs" />
+    <Compile Include="Data\Models\PrinterLatencyStatsEntity.cs" />
+    <Compile Include="Data\Models\NetworkLatencyBaselineEntity.cs" />
+    <Compile Include="Data\Models\PrinterSyncDto.cs" />
+    <Compile Include="Data\Models\IpChangeNotificationDto.cs" />
+    <Compile Include="Data\Models\SyncResponseDto.cs" />
+    <Compile Include="Rendering\HtmlBitmapRenderer.cs" />
+    <Compile Include="Rendering\BitmapResizer.cs" />
+    <Compile Include="Core\Network\ArpHelper.cs" />
+    <Compile Include="Core\Network\MacAddressNormalizer.cs" />
+    <Compile Include="Core\Network\PrinterIpResolver.cs" />
+    <Compile Include="Core\Network\SnmpHelper.cs" />
+    <Compile Include="Core\Network\NetworkConfig.cs" />
+    <Compile Include="Core\Network\LatencyTiming.cs" />
+    <Compile Include="Core\Network\PrinterIpChanger.cs" />
+    <Compile Include="Api\Controllers\NetworkController.cs" />
+    <Compile Include="Services\Network\INetworkConfigCapture.cs" />
+    <Compile Include="Services\Network\NetworkConfigCapture.cs" />
+    <Compile Include="Services\Network\INetworkSnapshotManager.cs" />
+    <Compile Include="Services\Network\NetworkSnapshotManager.cs" />
+    <Compile Include="Services\Network\INetworkHealthChecker.cs" />
+    <Compile Include="Services\Network\NetworkHealthChecker.cs" />
+    <Compile Include="Services\Network\ILatencyMeasurement.cs" />
+    <Compile Include="Services\Network\LatencyMeasurement.cs" />
+    <Compile Include="Services\Network\IDegradationDetector.cs" />
+    <Compile Include="Services\Network\DegradationDetector.cs" />
+    <Compile Include="Workers\NetworkWatcher.cs" />
+    <Compile Include="Services\Printers\IPrinterMacEnricher.cs" />
+    <Compile Include="Services\Printers\PrinterMacEnricher.cs" />
+    <Compile Include="Services\Printers\IPhysicalDeviceGrouper.cs" />
+    <Compile Include="Services\Printers\PhysicalDeviceGrouper.cs" />
+    <Compile Include="Services\Printers\IPrinterStateSync.cs" />
+    <Compile Include="Services\Printers\PrinterStateSync.cs" />
+    <Compile Include="Notifications\QuipuNetXNotifier.cs" />
+    <Compile Include="Notifications\JobStatusCallbackNotifier.cs" />
+    <Compile Include="Data\Models\JobStatusCallbackEntity.cs" />
+    <Compile Include="Data\Models\JobStatusCallbackDto.cs" />
+    <Compile Include="Workers\NotificationRetryWorker.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
+    <None Include="packages.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\dashboard.html" />
+  </ItemGroup>
+  <ItemGroup>
     <None Include="log4net.config">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <None Include="packages.config" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <Target Name="CopyGrpcNativeDeps" AfterTargets="Build">

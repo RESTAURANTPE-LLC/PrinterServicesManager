@@ -77,8 +77,17 @@ namespace PrinterServices.Api
             {
                 Log.DebugFormat("[HTTP] {0} {1}", request.HttpMethod, request.Url.AbsolutePath);
 
+                // RAZÓN: Intentar ruteo normal primero
                 var result = await _router.RouteAsync(request.HttpMethod, request.Url.AbsolutePath, request);
                 
+                // RAZÓN: Si result es null, es una ruta especial (dashboard HTML)
+                if (result == null)
+                {
+                    // Delegar a HandleSpecialRoute que maneja HTML directamente
+                    _router.HandleSpecialRoute(request.HttpMethod, request.Url.AbsolutePath, context);
+                    return; // Ya se cerró el response en HandleSpecialRoute
+                }
+
                 response.StatusCode = result.StatusCode;
                 response.ContentType = "application/json; charset=utf-8";
 

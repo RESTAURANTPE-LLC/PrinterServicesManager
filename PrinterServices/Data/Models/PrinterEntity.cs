@@ -36,8 +36,17 @@ namespace PrinterServices.Data.Models
         [Column("tapa_abierta")]
         public int TapaAbierta { get; set; }
 
+        [Column("disponible_para_imprimir")]
+        public int DisponibleParaImprimir { get; set; }
+
         [Column("ip_resuelta_por_arp")]
         public int IpResueltaPorArp { get; set; }
+
+        [Column("snmp_enabled")]
+        public int SnmpEnabled { get; set; }
+
+        [Column("snmp_community")]
+        public string SnmpCommunity { get; set; }
 
         [Column("ultimo_check")]
         public string UltimoCheck { get; set; }
@@ -51,7 +60,10 @@ namespace PrinterServices.Data.Models
             EstadoOnline = 0;
             TienePapel = 1;
             TapaAbierta = 0;
+            DisponibleParaImprimir = 0;
             IpResueltaPorArp = 0;
+            SnmpEnabled = 0;
+            SnmpCommunity = "public";
         }
     }
 }

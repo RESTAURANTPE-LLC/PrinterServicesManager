@@ -26,6 +26,7 @@ namespace PrinterServices.Notifications
         public const string TapaAbierta = "TAPA_ABIERTA"; // Impresora con tapa abierta (DLE EOT 2)
         public const string Reintento = "REINTENTO";     // Job re-encolado para un nuevo intento
         public const string Esperando = "ESPERANDO";     // Job movido a WAITING (impresora no disponible)
+        public const string Expirado = "EXPIRADO";       // Fase 23: Job WAITING que superó tiempo máximo configurado
     }
 
     /// <summary>
@@ -254,6 +255,24 @@ namespace PrinterServices.Notifications
             BroadcastToServidores(evt);       // Servidor muestra que hay jobs en espera
             SendToCliente(deviceIdOrigen, evt); // Cliente sabe que su comanda está pendiente
             PersistNotification(evt);
+        }
+
+        /// <summary>
+        /// Fase 23: Notifica que un job expiró (superó tiempo máximo en WAITING).
+        /// Es un estado terminal — el job no se reintenta.
+        /// Va a: todos los servidores + el cliente que originó la comanda.
+        /// </summary>
+        public void NotifyPrintExpired(string jobId, string comandaId, string impresoraId,
+            string impresoraNombre, string deviceIdOrigen, string ipOrigen, string reason)
+        {
+            // Job expirado — superó el tiempo máximo configurado en estado WAITING
+            var evt = CreateEvent(NotificationType.Expirado, jobId, comandaId,
+                impresoraId, impresoraNombre, deviceIdOrigen, ipOrigen,
+                reason, 0);
+
+            BroadcastToServidores(evt);         // Servidor necesita saber que el job ya no se procesará
+            SendToCliente(deviceIdOrigen, evt); // Cliente debe mostrar que su comanda expiró
+            PersistNotification(evt);           // Persistir para entrega diferida
         }
 
         /// <summary>

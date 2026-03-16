@@ -41,6 +41,9 @@ namespace PrinterServices.Data.Models
         [Column("ip_origen")]
         public string IpOrigen { get; set; }
 
+        [Column("ip_servidor")]
+        public string IpServidor { get; set; }  // IP del servidor QuipuNet (siempre se notifica aquí)
+
         [Column("copias")]
         public int Copias { get; set; }
 
@@ -85,6 +88,25 @@ namespace PrinterServices.Data.Models
 
         [Column("codigo_corte")]
         public string CodigoCorte { get; set; }
+
+        [Column("pedido_ids")]
+        public string PedidoIds { get; set; }
+
+        [Column("cash_drawer_code")]
+        public string CashDrawerCode { get; set; }
+
+        [Column("area_impresion")]
+        public string AreaImpresion { get; set; } // Área de producción (ej: "COCINA AUXILIAR", "BARRA")
+
+        // ─── Fase 7B: Campos para ventas, encuestas y promociones ──────────────
+        [Column("facturacion_electronica")]
+        public int FacturacionElectronica { get; set; }  // 1 = cadena tiene ##FE## marker para QR
+
+        [Column("tamanio_qr")]
+        public string TamanioQr { get; set; }            // Tamaño QR configurado (ej: "3", "5")
+
+        [Column("qr_encuesta")]
+        public string QrEncuesta { get; set; }           // Contenido del QR de encuesta
 
         public PrintJobEntity()
         {

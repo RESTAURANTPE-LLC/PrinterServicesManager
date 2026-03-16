@@ -242,8 +242,8 @@ namespace PrinterServices.Config
                 // ── Network / TCP ──
                 new ConfigSettingEntity
                 {
-                    Key = "TcpConnectTimeoutMs", Value = "3000", DefaultValue = "3000",
-                    Description = "Timeout de conexión TCP a impresoras (ms)",
+                    Key = "TcpConnectTimeoutMs", Value = "1500", DefaultValue = "1500",
+                    Description = "Timeout de conexión TCP a impresoras en ms (1.5s óptimo para LAN, 3s para WAN)",
                     Category = "network", ValueType = "int", MinValue = "500", MaxValue = "30000"
                 },
                 new ConfigSettingEntity
@@ -284,8 +284,8 @@ namespace PrinterServices.Config
                 // ── Monitoring ──
                 new ConfigSettingEntity
                 {
-                    Key = "StatusCheckIntervalSeconds", Value = "15", DefaultValue = "15",
-                    Description = "Intervalo en segundos entre checks de estado de impresoras",
+                    Key = "StatusCheckIntervalSeconds", Value = "3", DefaultValue = "3",
+                    Description = "Intervalo en segundos entre checks de estado de impresoras (3s con SNMP es óptimo, 15s para solo DLE EOT)",
                     Category = "monitoring", ValueType = "int", MinValue = "5", MaxValue = "300"
                 },
 
@@ -333,6 +333,46 @@ namespace PrinterServices.Config
                     Key = "AutoLearnGatewayOnFirstRun", Value = "1", DefaultValue = "1",
                     Description = "Aprender gateway automáticamente en primera ejecución",
                     Category = "network", ValueType = "bool"
+                },
+
+                // ── QuipuNetX Synchronization ──
+                new ConfigSettingEntity
+                {
+                    Key = "QuipuNetXUrl", Value = "http://localhost:8081", DefaultValue = "http://localhost:8081",
+                    Description = "URL base del servidor QuipuNetX para sincronización de cambios de IP",
+                    Category = "integration", ValueType = "string"
+                },
+                new ConfigSettingEntity
+                {
+                    Key = "QuipuNetXTimeoutMs", Value = "5000", DefaultValue = "5000",
+                    Description = "Timeout en ms para requests HTTP a QuipuNetX",
+                    Category = "integration", ValueType = "int", MinValue = "1000", MaxValue = "30000"
+                },
+                new ConfigSettingEntity
+                {
+                    Key = "NotificationRetryIntervalSeconds", Value = "30", DefaultValue = "30",
+                    Description = "Intervalo en segundos para reintentar notificaciones pendientes a QuipuNetX",
+                    Category = "integration", ValueType = "int", MinValue = "10", MaxValue = "300"
+                },
+                new ConfigSettingEntity
+                {
+                    Key = "NotificationMaxRetries", Value = "10", DefaultValue = "10",
+                    Description = "Número máximo de reintentos para notificaciones a QuipuNetX antes de marcar como FALLIDO",
+                    Category = "integration", ValueType = "int", MinValue = "1", MaxValue = "50"
+                },
+
+                // ── Fase 23: Expiración de jobs WAITING ──
+                new ConfigSettingEntity
+                {
+                    Key = "ExpirarImpresionDespuesDe", Value = "0", DefaultValue = "0",
+                    Description = "Segundos máximos en WAITING antes de expirar. 0 = desactivado. Recibido desde QuipuNetX via /api/config/sync.",
+                    Category = "integration", ValueType = "int", MinValue = "0", MaxValue = "86400"
+                },
+                new ConfigSettingEntity
+                {
+                    Key = "QuipuNetXPort", Value = "8081", DefaultValue = "8081",
+                    Description = "Puerto HTTP del servidor QuipuNetX para callbacks de estado de jobs",
+                    Category = "integration", ValueType = "int", MinValue = "1", MaxValue = "65535"
                 }
             };
 
