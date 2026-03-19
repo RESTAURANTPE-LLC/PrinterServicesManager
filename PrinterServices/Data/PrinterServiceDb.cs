@@ -67,6 +67,9 @@ namespace PrinterServices.Data
             // Fase 23: Tabla de callbacks de estado de jobs para QuipuNetX
             CreateTable<Models.JobStatusCallbackEntity>();
 
+            // Tabla de log de transiciones de estado de impresoras (ONLINE/OFFLINE)
+            CreateTable<Models.PrinterStatusLogEntity>();
+
             // Fase 8: Tablas de monitoreo de red y latencias
             CreateTable<Models.NetworkSnapshotEntity>();
             CreateTable<Models.NetworkCurrentEntity>();
@@ -191,6 +194,8 @@ namespace PrinterServices.Data
                 // Migración: eliminar índice viejo no-unique si existe, crear el nuevo UNIQUE.
                 try { Execute("DROP INDEX IF EXISTS idx_printers_mac"); } catch { }
                 Execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_printers_mac_unique ON printers(mac_address)");
+                Execute("CREATE INDEX IF NOT EXISTS idx_printer_status_log_fecha ON printer_status_log(fecha)");
+                Execute("CREATE INDEX IF NOT EXISTS idx_printer_status_log_imp ON printer_status_log(impresora_id, fecha)");
                 Execute("CREATE INDEX IF NOT EXISTS idx_notif_estado ON notificacionescambiosip(estado)");
                 Execute("CREATE INDEX IF NOT EXISTS idx_notif_mac ON notificacionescambiosip(mac_address)");
 

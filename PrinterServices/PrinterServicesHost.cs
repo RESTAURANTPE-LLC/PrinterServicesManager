@@ -29,6 +29,7 @@ namespace PrinterServices
         private GrpcNotificationServer _grpcServer;
         private UdpDiscoveryServer _udpDiscovery;     // Fase 6: auto-descubrimiento UDP
         private NetworkWatcher _networkWatcher;       // Fase 8: monitoreo bidireccional de red
+        private DbMaintenanceWorker _dbMaintenanceWorker; // Purga logs > 30 días cada hora
 
         public void Start()
         {
@@ -41,6 +42,12 @@ namespace PrinterServices
                 // 1. Inicializar base de datos SQLite
                 _db = PrinterServiceDb.GetInstance();
                 Log.Info("[DB] Base de datos inicializada: " + _db.DatabasePath);
+
+                // 1.1. Inicializar worker de mantenimiento de BD (purga logs > 30 días)
+                // Se ejecuta inmediatamente al inicio y luego cada hora
+                _dbMaintenanceWorker = new DbMaintenanceWorker(_db);
+                _dbMaintenanceWorker.Start();
+                Log.Info("[DB-MAINTENANCE] Worker de mantenimiento de BD iniciado (purga cada 1h)");
 
                 // 2. Inicializar ConfigManager (centralizado, BD-backed)
                 _configManager = ConfigManager.GetInstance(_db);
@@ -217,6 +224,13 @@ namespace PrinterServices
                 {
                     _grpcServer.Stop();
                     Log.Info("[gRPC] Servidor gRPC detenido");
+                }
+
+                // Detener DbMaintenanceWorker (purga de logs antiguos)
+                if (_dbMaintenanceWorker != null)
+                {
+                    _dbMaintenanceWorker.Stop();
+                    Log.Info("[DB-MAINTENANCE] Worker de mantenimiento detenido");
                 }
 
                 if (_db != null)

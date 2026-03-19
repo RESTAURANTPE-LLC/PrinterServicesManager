@@ -432,6 +432,9 @@ namespace PrinterServices.Monitoring
                         Log.InfoFormat("[MONITOR] ✓ {0} ({1}) ONLINE — conectividad restaurada",
                             printer.Nombre ?? printer.ImpresoraId, printer.Ip);
                         
+                        // Registrar transición en printer_status_log
+                        LogStatusTransition(printer, "OFFLINE", "ONLINE", "Conectividad restaurada");
+                        
                         // ★ CANCELAR búsqueda ARP si estaba en progreso (ya no es necesaria)
                         _arpWorker?.CancelScan(printer.ImpresoraId);
                         
@@ -454,10 +457,13 @@ namespace PrinterServices.Monitoring
                         }
                     }
                     // TRANSICIÓN 2: Perdió conectividad de red
-                    else if (!status.Online)
+                    else if (wasOnline && !status.Online)
                     {
                         Log.WarnFormat("[MONITOR] ✗ {0} ({1}) OFFLINE — perdió conectividad de red",
                             printer.Nombre ?? printer.ImpresoraId, printer.Ip);
+                        
+                        // Registrar transición en printer_status_log
+                        LogStatusTransition(printer, "ONLINE", "OFFLINE", "Perdió conectividad de red");
                         
                         // ★ DELEGAR búsqueda ARP a worker independiente (NO BLOQUEAR)
                         // ArpScanWorker procesará async en su propio hilo (~500ms)
@@ -485,6 +491,9 @@ namespace PrinterServices.Monitoring
                     {
                         Log.InfoFormat("[MONITOR] ✓ {0} ({1}) DISPONIBLE — re-encolando jobs en espera",
                             printer.Nombre ?? printer.ImpresoraId, printer.Ip);
+                        
+                        // Registrar transición en printer_status_log
+                        LogStatusTransition(printer, "NO_DISPONIBLE", "DISPONIBLE", "Disponible para imprimir");
                         RequeueWaitingJobs(printer.ImpresoraId);
                         NotifyPrinterChange(printer.ImpresoraId, printer.Nombre,
                             NotificationType.Online, "Impresora disponible para imprimir");
@@ -496,6 +505,9 @@ namespace PrinterServices.Monitoring
                                        !status.TienePapel ? "sin papel" : "no lista";
                         Log.WarnFormat("[MONITOR] ⚠ {0} ({1}) NO DISPONIBLE — {2}",
                             printer.Nombre ?? printer.ImpresoraId, printer.Ip, razon);
+                        
+                        // Registrar transición en printer_status_log
+                        LogStatusTransition(printer, "DISPONIBLE", "NO_DISPONIBLE", razon);
                         
                         if (!status.TienePapel)
                         {
@@ -622,6 +634,33 @@ namespace PrinterServices.Monitoring
             }
 
             Log.WarnFormat("[MONITOR] Job {0} EXPIRADO → {1}", job.JobId, reason); // Log de advertencia
+        }
+
+        /// <summary>
+        /// Registra una transición de estado de impresora en printer_status_log.
+        /// RAZÓN: Generar reporte de disponibilidad (a qué hora se desconectó, a qué hora volvió).
+        /// </summary>
+        private void LogStatusTransition(PrinterEntity printer, string estadoAnterior, string estadoNuevo, string detalle)
+        {
+            try
+            {
+                var logEntry = new PrinterStatusLogEntity
+                {
+                    ImpresoraId = printer.ImpresoraId,
+                    ImpresoraNombre = printer.Nombre,
+                    ImpresoraIp = printer.Ip,
+                    MacAddress = printer.MacAddress,
+                    EstadoAnterior = estadoAnterior,
+                    EstadoNuevo = estadoNuevo,
+                    Detalle = detalle,
+                    Fecha = DateTime.Now.ToString("o")
+                };
+                _db.Insert(logEntry);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("[MONITOR] Error registrando transición de estado: " + ex.Message);
+            }
         }
 
         /// <summary>

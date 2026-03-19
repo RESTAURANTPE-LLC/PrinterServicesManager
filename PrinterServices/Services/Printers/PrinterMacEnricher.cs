@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using log4net;
 using PrinterServices.Core.Network;
 using PrinterServices.Data;
@@ -94,15 +95,20 @@ namespace PrinterServices.Services.Printers
                 }
 
                 // Dedup por MAC: si otra impresora ya tiene la misma MAC, es el mismo dispositivo físico
-                // → eliminar la entrada vieja para evitar duplicados en el dashboard
+                // → actualizar los datos de la impresora existente (no duplicar, no eliminar)
                 var macDuplicate = _db.Query<PrinterEntity>(
                     "SELECT * FROM printers WHERE mac_address = ? AND impresora_id != ?",
                     normalizedMac, printer.ImpresoraId).FirstOrDefault();
                 if (macDuplicate != null)
                 {
-                    _db.Delete<PrinterEntity>(macDuplicate.ImpresoraId);
-                    Log.WarnFormat("[MAC-ENRICH] Duplicado por MAC eliminado: {0} ({1}) → reemplazado por {2}",
-                        macDuplicate.ImpresoraId, macDuplicate.Nombre, printer.ImpresoraId);
+                    // Actualizar la impresora que ya tiene esa MAC con la IP actual
+                    macDuplicate.Ip = printer.Ip;
+                    macDuplicate.Nombre = printer.Nombre ?? macDuplicate.Nombre;
+                    _db.Update(macDuplicate);
+                    Log.WarnFormat("[MAC-ENRICH] MAC {0} ya registrada en {1} ({2}) → IP actualizada a {3}. No se asigna MAC a {4}",
+                        MacAddressNormalizer.Format(normalizedMac), macDuplicate.ImpresoraId, macDuplicate.Nombre,
+                        printer.Ip, printer.Nombre ?? printer.ImpresoraId);
+                    return false; // No asignar MAC a esta impresora, ya existe en otra
                 }
 
                 // Asignar MAC normalizada a la entidad

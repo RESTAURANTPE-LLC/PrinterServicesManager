@@ -58,6 +58,37 @@
             </div>
         </section>
 
+        <!-- Reporte de Conectividad (Desconexiones/Reconexiones) -->
+        <section class="mb-6 bg-gray-800 p-4 rounded-lg">
+            <h2 class="text-2xl font-semibold mb-3">🔌 Reporte de Conectividad</h2>
+            <p class="text-sm text-gray-400 mb-3">Historial de desconexiones y reconexiones de impresoras con timestamps exactos</p>
+            <div class="mb-3 flex gap-3 items-center">
+                <label class="text-sm text-gray-400">Filtrar por impresora:</label>
+                <select id="connectivity-filter" onchange="loadConnectivity(1)" class="bg-gray-700 text-white px-3 py-1 rounded text-sm">
+                    <option value="">— Todas —</option>
+                </select>
+            </div>
+            <div id="connectivity-table" class="overflow-x-auto mb-4">
+                <div class="text-gray-400">Cargando...</div>
+            </div>
+            <div id="connectivity-pagination" class="flex justify-center gap-2"></div>
+        </section>
+
+        <!-- Historial de Red -->
+        <section class="mb-6 bg-gray-800 p-4 rounded-lg">
+            <h2 class="text-2xl font-semibold mb-3">🌐 Historial de Cambios de Red</h2>
+            <p class="text-sm text-gray-400 mb-3">Alertas de red, cambios de gateway, degradación de latencia y cambios de IP de impresoras</p>
+            <div id="network-history-table" class="overflow-x-auto mb-4">
+                <div class="text-gray-400">Cargando...</div>
+            </div>
+            <div id="network-history-pagination" class="flex justify-center gap-2"></div>
+            <!-- Cambios de IP de impresoras -->
+            <h3 class="text-xl font-semibold mt-6 mb-3">📡 Cambios de IP de Impresoras (ARP)</h3>
+            <div id="ip-changes-table" class="overflow-x-auto">
+                <div class="text-gray-400">Cargando...</div>
+            </div>
+        </section>
+
         <!-- Gráfica de Latencias -->
         <section class="mb-6 bg-gray-800 p-4 rounded-lg">
             <h2 class="text-2xl font-semibold mb-3">⏱️ Latencias Recientes</h2>
@@ -119,6 +150,8 @@
         let latencyChart = null;
         let currentPage = 1;
         let currentNotifPage = 1;
+        let currentConnPage = 1;
+        let currentNetHistPage = 1;
 
         // Formatear fecha ISO a formato legible: "23/02/2026 14:01:49"
         function formatDate(isoStr) {
@@ -659,11 +692,200 @@
             }
         }
 
+        // ─── Reporte de Conectividad (Desconexiones/Reconexiones) ──────────
+        function getTransitionBadge(estadoAnterior, estadoNuevo) {
+            const colors = {
+                'ONLINE': 'bg-green-600',
+                'OFFLINE': 'bg-red-600',
+                'DISPONIBLE': 'bg-emerald-600',
+                'NO_DISPONIBLE': 'bg-orange-600'
+            };
+            const anteriorClass = colors[estadoAnterior] || 'bg-gray-600';
+            const nuevoClass = colors[estadoNuevo] || 'bg-gray-600';
+            return `<span class="px-2 py-1 rounded text-xs ${anteriorClass}">${estadoAnterior}</span>` +
+                   ` → ` +
+                   `<span class="px-2 py-1 rounded text-xs ${nuevoClass}">${estadoNuevo}</span>`;
+        }
+
+        async function loadConnectivity(page = 1) {
+            try {
+                const filter = document.getElementById('connectivity-filter').value;
+                let url = window.location.origin + `/api/dashboard/connectivity?page=${page}&limit=50`;
+                if (filter) url += `&impresora_id=${encodeURIComponent(filter)}`;
+
+                const response = await fetch(url);
+                if (!response.ok) {
+                    const errData = await response.json().catch(() => ({}));
+                    throw new Error(errData.error || 'HTTP ' + response.status);
+                }
+                const data = await response.json();
+                currentConnPage = page;
+
+                // Actualizar select de filtro con lista de impresoras (solo primera vez)
+                const select = document.getElementById('connectivity-filter');
+                if (select.options.length <= 1 && data.printers && data.printers.length > 0) {
+                    data.printers.forEach(p => {
+                        const opt = document.createElement('option');
+                        opt.value = p.id;
+                        opt.textContent = p.nombre || p.id;
+                        select.appendChild(opt);
+                    });
+                }
+
+                if (data.items.length > 0) {
+                    document.getElementById('connectivity-table').innerHTML = `
+                        <table class="w-full text-sm">
+                            <thead class="bg-gray-700">
+                                <tr>
+                                    <th class="p-2 text-left">Fecha/Hora</th>
+                                    <th class="p-2 text-left">Impresora</th>
+                                    <th class="p-2 text-left">IP</th>
+                                    <th class="p-2 text-left">MAC</th>
+                                    <th class="p-2 text-left">Transición</th>
+                                    <th class="p-2 text-left">Detalle</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${data.items.map(item => `
+                                    <tr class="border-b border-gray-700 ${item.estadoNuevo === 'OFFLINE' ? 'bg-red-900 bg-opacity-10' : ''} ${item.estadoNuevo === 'ONLINE' ? 'bg-green-900 bg-opacity-10' : ''}">
+                                        <td class="p-2 text-xs font-mono">${formatDate(item.fecha)}</td>
+                                        <td class="p-2 font-semibold">${item.impresoraNombre || item.impresoraId}</td>
+                                        <td class="p-2 font-mono text-xs">${item.impresoraIp || '-'}</td>
+                                        <td class="p-2 font-mono text-xs">${item.macAddress || '-'}</td>
+                                        <td class="p-2">${getTransitionBadge(item.estadoAnterior, item.estadoNuevo)}</td>
+                                        <td class="p-2 text-xs text-gray-300">${item.detalle || '-'}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    `;
+                } else {
+                    document.getElementById('connectivity-table').innerHTML = '<p class="text-gray-400">Sin registros de conectividad aún. Los eventos se registrarán cuando las impresoras cambien de estado.</p>';
+                }
+
+                // Paginación
+                let pag = '';
+                if (page > 1) {
+                    pag += `<button onclick="loadConnectivity(${page - 1})" class="px-4 py-2 bg-teal-600 hover:bg-teal-700 rounded">← Anterior</button>`;
+                }
+                pag += `<span class="px-4 py-2 text-gray-300">Página ${page} de ${data.totalPages || 1} (${data.total} registros)</span>`;
+                if (page < data.totalPages) {
+                    pag += `<button onclick="loadConnectivity(${page + 1})" class="px-4 py-2 bg-teal-600 hover:bg-teal-700 rounded">Siguiente →</button>`;
+                }
+                document.getElementById('connectivity-pagination').innerHTML = pag;
+            } catch (error) {
+                console.error('Error loading connectivity:', error);
+                document.getElementById('connectivity-table').innerHTML = '<p class="text-red-400">Error cargando reporte: ' + error.message + '</p>';
+            }
+        }
+
+        // ─── Historial de Red ──────────────────────────────────────────────
+        function getSeverityBadge(severity) {
+            if (severity === 'critical') return '<span class="px-2 py-1 rounded text-xs bg-red-600">CRITICAL</span>';
+            if (severity === 'warning') return '<span class="px-2 py-1 rounded text-xs bg-yellow-600 text-black">WARNING</span>';
+            if (severity === 'info') return '<span class="px-2 py-1 rounded text-xs bg-blue-600">INFO</span>';
+            return '<span class="px-2 py-1 rounded text-xs bg-gray-600">' + (severity || '-') + '</span>';
+        }
+
+        async function loadNetworkHistory(page = 1) {
+            try {
+                const response = await fetch(window.location.origin + `/api/dashboard/network-history?page=${page}&limit=20`);
+                if (!response.ok) {
+                    const errData = await response.json().catch(() => ({}));
+                    throw new Error(errData.error || 'HTTP ' + response.status);
+                }
+                const data = await response.json();
+                currentNetHistPage = page;
+
+                // Alertas de red
+                if (data.alerts.length > 0) {
+                    document.getElementById('network-history-table').innerHTML = `
+                        <table class="w-full text-sm">
+                            <thead class="bg-gray-700">
+                                <tr>
+                                    <th class="p-2 text-left">Fecha/Hora</th>
+                                    <th class="p-2 text-left">Severidad</th>
+                                    <th class="p-2 text-left">Tipo</th>
+                                    <th class="p-2 text-left">Mensaje</th>
+                                    <th class="p-2 text-left">Gateway Anterior</th>
+                                    <th class="p-2 text-left">Gateway Actual</th>
+                                    <th class="p-2 text-left">Notificado</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${data.alerts.map(a => `
+                                    <tr class="border-b border-gray-700 ${a.severity === 'critical' ? 'bg-red-900 bg-opacity-10' : ''}">
+                                        <td class="p-2 text-xs font-mono">${formatDate(a.detectedAt)}</td>
+                                        <td class="p-2">${getSeverityBadge(a.severity)}</td>
+                                        <td class="p-2 text-xs">${a.alertType || '-'}</td>
+                                        <td class="p-2 text-xs">${a.message || '-'}</td>
+                                        <td class="p-2 font-mono text-xs">${a.previousGatewayMac || '-'}</td>
+                                        <td class="p-2 font-mono text-xs">${a.currentGatewayMac || '-'}</td>
+                                        <td class="p-2">${a.notified ? '✅' : '⏳'}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    `;
+                } else {
+                    document.getElementById('network-history-table').innerHTML = '<p class="text-gray-400">Sin alertas de red registradas</p>';
+                }
+
+                // Paginación
+                let pag = '';
+                if (page > 1) {
+                    pag += `<button onclick="loadNetworkHistory(${page - 1})" class="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded">← Anterior</button>`;
+                }
+                pag += `<span class="px-4 py-2 text-gray-300">Página ${page} de ${data.totalPages || 1} (${data.total} alertas)</span>`;
+                if (page < data.totalPages) {
+                    pag += `<button onclick="loadNetworkHistory(${page + 1})" class="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded">Siguiente →</button>`;
+                }
+                document.getElementById('network-history-pagination').innerHTML = pag;
+
+                // Cambios de IP
+                if (data.ipChanges && data.ipChanges.length > 0) {
+                    document.getElementById('ip-changes-table').innerHTML = `
+                        <table class="w-full text-sm">
+                            <thead class="bg-gray-700">
+                                <tr>
+                                    <th class="p-2 text-left">Fecha</th>
+                                    <th class="p-2 text-left">MAC</th>
+                                    <th class="p-2 text-left">IP Anterior</th>
+                                    <th class="p-2 text-left">IP Nueva</th>
+                                    <th class="p-2 text-left">Estado</th>
+                                    <th class="p-2 text-left">Intentos</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${data.ipChanges.map(c => `
+                                    <tr class="border-b border-gray-700">
+                                        <td class="p-2 text-xs font-mono">${formatDate(c.fechaCreacion)}</td>
+                                        <td class="p-2 font-mono text-xs">${c.macAddress || '-'}</td>
+                                        <td class="p-2 font-mono text-xs">${c.oldIp || '-'}</td>
+                                        <td class="p-2 font-mono text-xs text-green-400">${c.newIp || '-'}</td>
+                                        <td class="p-2">${c.estado === 'ENVIADO' ? '<span class="px-2 py-1 rounded text-xs bg-green-600">ENVIADO</span>' : c.estado === 'PENDIENTE' ? '<span class="px-2 py-1 rounded text-xs bg-yellow-600 text-black">PENDIENTE</span>' : '<span class="px-2 py-1 rounded text-xs bg-red-600">' + (c.estado || '-') + '</span>'}</td>
+                                        <td class="p-2 text-center">${c.intentos}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    `;
+                } else {
+                    document.getElementById('ip-changes-table').innerHTML = '<p class="text-gray-400">Sin cambios de IP registrados</p>';
+                }
+            } catch (error) {
+                console.error('Error loading network history:', error);
+                document.getElementById('network-history-table').innerHTML = '<p class="text-red-400">Error cargando historial: ' + error.message + '</p>';
+            }
+        }
+
         // Iniciar
         initChart();
         fetchDashboardData();
         loadHistory(1);
         loadNotifications(1);
+        loadConnectivity(1);
+        loadNetworkHistory(1);
         setInterval(fetchDashboardData, 3000); // Actualizar cada 3s
     </script>
 </body>

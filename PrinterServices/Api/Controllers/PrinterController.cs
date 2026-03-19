@@ -1,8 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using log4net;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using PrinterServices.Core.Network;
 using PrinterServices.Data;
 using PrinterServices.Data.Models;
 
@@ -133,7 +135,7 @@ namespace PrinterServices.Api.Controllers
                     }
 
                     // Dedup por MAC: si otra impresora ya tiene la misma MAC, es el mismo dispositivo físico
-                    // → eliminar la entrada vieja para evitar duplicados en el dashboard
+                    // → actualizar los datos de la impresora existente (no duplicar, no eliminar)
                     if (!string.IsNullOrEmpty(existing.MacAddress))
                     {
                         var macDuplicate = _db.Query<PrinterEntity>(
@@ -141,9 +143,19 @@ namespace PrinterServices.Api.Controllers
                             existing.MacAddress, impresoraId).FirstOrDefault();
                         if (macDuplicate != null)
                         {
-                            _db.Delete<PrinterEntity>(macDuplicate.ImpresoraId);
-                            Log.WarnFormat("[PRINTER] Duplicado por MAC eliminado en update: {0} ({1}) → reemplazado por {2}",
-                                macDuplicate.ImpresoraId, macDuplicate.Nombre, impresoraId);
+                            // Actualizar la impresora que ya tiene esa MAC con los datos nuevos
+                            macDuplicate.Ip = ip;
+                            macDuplicate.Nombre = GetString(json, "nombre") ?? macDuplicate.Nombre;
+                            macDuplicate.Modelo = GetString(json, "modelo") ?? GetString(json, "printermodel") ?? macDuplicate.Modelo;
+                            macDuplicate.ModoImpresion = GetString(json, "modo_impresion") ?? macDuplicate.ModoImpresion;
+                            if (existing.Puerto > 0) macDuplicate.Puerto = existing.Puerto;
+                            _db.Update(macDuplicate);
+                            // Quitar la MAC del registro actual para evitar duplicado
+                            existing.MacAddress = null;
+                            _db.Update(existing);
+                            Log.WarnFormat("[PRINTER] MAC {0} ya registrada en {1} ({2}) → datos actualizados. Se quitó MAC de {3}",
+                                macDuplicate.MacAddress, macDuplicate.ImpresoraId, macDuplicate.Nombre, impresoraId);
+                            return ApiResult.Ok(JsonConvert.SerializeObject(new { status = "UPDATED_BY_MAC", impresoraId = macDuplicate.ImpresoraId }));
                         }
                     }
 
@@ -174,7 +186,7 @@ namespace PrinterServices.Api.Controllers
                     }
 
                     // Dedup por MAC: si otra impresora ya tiene la misma MAC, es el mismo dispositivo físico
-                    // → eliminar la entrada vieja para evitar duplicados en el dashboard
+                    // → actualizar los datos de la impresora existente (no duplicar, no eliminar)
                     if (!string.IsNullOrEmpty(printer.MacAddress))
                     {
                         var macDuplicate = _db.Query<PrinterEntity>(
@@ -182,9 +194,16 @@ namespace PrinterServices.Api.Controllers
                             printer.MacAddress, impresoraId).FirstOrDefault();
                         if (macDuplicate != null)
                         {
-                            _db.Delete<PrinterEntity>(macDuplicate.ImpresoraId);
-                            Log.WarnFormat("[PRINTER] Duplicado por MAC eliminado: {0} ({1}) → reemplazado por {2}",
-                                macDuplicate.ImpresoraId, macDuplicate.Nombre, impresoraId);
+                            // Actualizar la impresora que ya tiene esa MAC con los datos nuevos
+                            macDuplicate.Ip = ip;
+                            macDuplicate.Nombre = printer.Nombre ?? macDuplicate.Nombre;
+                            macDuplicate.Modelo = printer.Modelo ?? macDuplicate.Modelo;
+                            macDuplicate.ModoImpresion = printer.ModoImpresion ?? macDuplicate.ModoImpresion;
+                            if (printer.Puerto > 0) macDuplicate.Puerto = printer.Puerto;
+                            _db.Update(macDuplicate);
+                            Log.WarnFormat("[PRINTER] MAC {0} ya registrada en {1} ({2}) → datos actualizados con info de {3}",
+                                macDuplicate.MacAddress, macDuplicate.ImpresoraId, macDuplicate.Nombre, impresoraId);
+                            return ApiResult.Ok(JsonConvert.SerializeObject(new { status = "UPDATED_BY_MAC", impresoraId = macDuplicate.ImpresoraId }));
                         }
                     }
 
@@ -229,9 +248,53 @@ namespace PrinterServices.Api.Controllers
 
                 int insertedCount = 0; // Contador de impresoras nuevas insertadas
                 int updatedCount = 0;  // Contador de impresoras existentes actualizadas
+                int skippedDupMac = 0; // Contador de impresoras omitidas por MAC duplicada en batch
 
-                // Procesar cada impresora en el array
+                // ═══════════════════════════════════════════════════════════════════════════════
+                // PRE-PROCESO: Consolidar duplicados por MAC DENTRO del batch
+                // RAZÓN: QuipuNetX puede enviar múltiples impresoras lógicas con la misma MAC
+                // (ej: "PRINTER 1" y "PRINTER1" apuntando al mismo dispositivo físico).
+                // Quedarse solo con la PRIMERA por cada MAC normalizada.
+                // ═══════════════════════════════════════════════════════════════════════════════
+                var seenMacs = new Dictionary<string, string>(); // MAC normalizada → impresora_id ganadora
+                var dedupedPrinters = new List<PrinterSyncDto>();
+
                 foreach (var dto in printers)
+                {
+                    if (string.IsNullOrEmpty(dto.mac_address))
+                    {
+                        // Sin MAC: incluir siempre (se enriquecerá luego vía ARP)
+                        dedupedPrinters.Add(dto);
+                        continue;
+                    }
+
+                    string normalizedMac = MacAddressNormalizer.Normalize(dto.mac_address);
+                    if (string.IsNullOrEmpty(normalizedMac))
+                    {
+                        dedupedPrinters.Add(dto);
+                        continue;
+                    }
+
+                    if (seenMacs.ContainsKey(normalizedMac))
+                    {
+                        // MAC ya vista en este batch → omitir duplicado
+                        Log.WarnFormat("[PRINTER-SYNC] Duplicado por MAC en batch: {0} ({1}) tiene misma MAC {2} que {3} → omitiendo",
+                            dto.impresora_id, dto.nombre, MacAddressNormalizer.Format(normalizedMac), seenMacs[normalizedMac]);
+                        skippedDupMac++;
+                        continue;
+                    }
+
+                    seenMacs[normalizedMac] = dto.impresora_id;
+                    dedupedPrinters.Add(dto);
+                }
+
+                if (skippedDupMac > 0)
+                {
+                    Log.WarnFormat("[PRINTER-SYNC] ⚠ {0} impresora(s) omitida(s) por MAC duplicada en batch", skippedDupMac);
+                }
+
+                // Procesar cada impresora del batch ya deduplicado
+                foreach (var dto in dedupedPrinters)
                 {
                     // Validar campos obligatorios
                     if (string.IsNullOrEmpty(dto.impresora_id))
@@ -262,7 +325,7 @@ namespace PrinterServices.Api.Controllers
                         // NOTA: NO actualizar estado online/offline - eso lo maneja StatusMonitor
 
                         // Dedup por MAC: si otra impresora ya tiene la misma MAC, es el mismo dispositivo físico
-                        // → eliminar la entrada vieja para evitar duplicados en el dashboard
+                        // → actualizar los datos de la impresora existente (no duplicar, no eliminar)
                         if (!string.IsNullOrEmpty(existing.MacAddress))
                         {
                             var macDuplicate = _db.Query<PrinterEntity>(
@@ -270,9 +333,18 @@ namespace PrinterServices.Api.Controllers
                                 existing.MacAddress, dto.impresora_id).FirstOrDefault();
                             if (macDuplicate != null)
                             {
-                                _db.Delete<PrinterEntity>(macDuplicate.ImpresoraId);
-                                Log.WarnFormat("[PRINTER-SYNC] Duplicado por MAC eliminado en update: {0} ({1}) → reemplazado por {2}",
-                                    macDuplicate.ImpresoraId, macDuplicate.Nombre, dto.impresora_id);
+                                // Actualizar la impresora que ya tiene esa MAC con los datos nuevos
+                                macDuplicate.Ip = dto.ip;
+                                macDuplicate.Nombre = dto.nombre ?? macDuplicate.Nombre;
+                                macDuplicate.Puerto = dto.puerto > 0 ? dto.puerto : macDuplicate.Puerto;
+                                _db.Update(macDuplicate);
+                                // Quitar la MAC del registro actual para evitar duplicado
+                                existing.MacAddress = null;
+                                _db.Update(existing);
+                                Log.WarnFormat("[PRINTER-SYNC] MAC {0} ya registrada en {1} ({2}) → datos actualizados. Se quitó MAC de {3}",
+                                    macDuplicate.MacAddress, macDuplicate.ImpresoraId, macDuplicate.Nombre, dto.impresora_id);
+                                updatedCount++;
+                                continue; // Ya se procesó, saltar al siguiente
                             }
                         }
 
@@ -303,7 +375,7 @@ namespace PrinterServices.Api.Controllers
                         };
 
                         // Dedup por MAC: si otra impresora ya tiene la misma MAC, es el mismo dispositivo físico
-                        // → eliminar la entrada vieja para evitar duplicados en el dashboard
+                        // → actualizar los datos de la impresora existente (no duplicar, no eliminar)
                         if (!string.IsNullOrEmpty(newPrinter.MacAddress))
                         {
                             var macDuplicate = _db.Query<PrinterEntity>(
@@ -311,9 +383,15 @@ namespace PrinterServices.Api.Controllers
                                 newPrinter.MacAddress, dto.impresora_id).FirstOrDefault();
                             if (macDuplicate != null)
                             {
-                                _db.Delete<PrinterEntity>(macDuplicate.ImpresoraId);
-                                Log.WarnFormat("[PRINTER-SYNC] Duplicado por MAC eliminado: {0} ({1}) → reemplazado por {2}",
-                                    macDuplicate.ImpresoraId, macDuplicate.Nombre, dto.impresora_id);
+                                // Actualizar la impresora que ya tiene esa MAC con los datos nuevos
+                                macDuplicate.Ip = dto.ip;
+                                macDuplicate.Nombre = dto.nombre ?? macDuplicate.Nombre;
+                                macDuplicate.Puerto = dto.puerto > 0 ? dto.puerto : macDuplicate.Puerto;
+                                _db.Update(macDuplicate);
+                                Log.WarnFormat("[PRINTER-SYNC] MAC {0} ya registrada en {1} ({2}) → datos actualizados con info de {3}",
+                                    macDuplicate.MacAddress, macDuplicate.ImpresoraId, macDuplicate.Nombre, dto.impresora_id);
+                                updatedCount++;
+                                continue; // No insertar, ya se actualizó la existente
                             }
                         }
 
@@ -328,8 +406,8 @@ namespace PrinterServices.Api.Controllers
                 // Crear respuesta exitosa con estadísticas
                 var response = SyncResponseDto.Success(insertedCount, updatedCount);
 
-                Log.InfoFormat("[PRINTER-SYNC] ✅ Sincronización completada: {0} impresoras ({1} nuevas, {2} actualizadas)", 
-                    response.synchronized, insertedCount, updatedCount); // Log de resumen
+                Log.InfoFormat("[PRINTER-SYNC] ✅ Sincronización completada: {0} impresoras ({1} nuevas, {2} actualizadas, {3} omitidas por MAC duplicada)", 
+                    response.synchronized, insertedCount, updatedCount, skippedDupMac); // Log de resumen
 
                 // Serializar DTO a JSON y retornar 200 OK
                 return ApiResult.Ok(JsonConvert.SerializeObject(response));

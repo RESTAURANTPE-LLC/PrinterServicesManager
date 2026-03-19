@@ -43,6 +43,7 @@
     <Reference Include="log4net, Version=2.0.15.0, Culture=neutral, PublicKeyToken=669e0ddf0bb1aa2a, processorArchitecture=MSIL">
       <HintPath>..\packages\log4net.2.0.15\lib\net45\log4net.dll</HintPath>
     </Reference>
+    <Reference Include="System.Web.Extensions" />
     <Reference Include="Topshelf, Version=4.3.0.0, Culture=neutral, PublicKeyToken=b800c4cfcdeea87b, processorArchitecture=MSIL">
       <HintPath>..\packages\Topshelf.4.3.0\lib\net452\Topshelf.dll</HintPath>
     </Reference>
@@ -161,8 +162,10 @@
     <Compile Include="Notifications\QuipuNetXNotifier.cs" />
     <Compile Include="Notifications\JobStatusCallbackNotifier.cs" />
     <Compile Include="Data\Models\JobStatusCallbackEntity.cs" />
+    <Compile Include="Data\Models\PrinterStatusLogEntity.cs" />
     <Compile Include="Data\Models\JobStatusCallbackDto.cs" />
     <Compile Include="Workers\NotificationRetryWorker.cs" />
+    <Compile Include="Workers\DbMaintenanceWorker.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />

@@ -113,22 +113,39 @@ namespace PrinterServices.Workers
             {
                 try
                 {
-                    // Leer configuración de expiración (0 = desactivado)
-                    int expirarDespuesDe = ConfigManager.Instance.GetInt("ExpirarImpresionDespuesDe", 0);
+                    // Consultar TODOS los jobs WAITING en BD (independiente de config de expiración)
+                    // RAZÓN: Detectar si la impresora volvió online para re-encolar inmediatamente,
+                    // además de expirar si superó el tiempo configurado.
+                    // FIX: Si la desconexión fue breve (entre ciclos de StatusMonitor), StatusMonitor
+                    // no detecta transición OFFLINE→ONLINE y el job queda atrapado en WAITING.
+                    // Este loop lo detecta cada 5s consultando estado actual de la impresora en BD.
+                    var waitingJobs = _db.Query<PrintJobEntity>(
+                        "SELECT * FROM print_jobs WHERE estado = 'WAITING'");
 
-                    if (expirarDespuesDe > 0)                              // Solo si expiración está activada
+                    if (waitingJobs != null && waitingJobs.Count > 0)
                     {
-                        // Consultar TODOS los jobs WAITING en BD
-                        var waitingJobs = _db.Query<PrintJobEntity>(
-                            "SELECT * FROM print_jobs WHERE estado = 'WAITING'");
+                        int expirarDespuesDe = ConfigManager.Instance.GetInt("ExpirarImpresionDespuesDe", 0);
+                        int requeuedCount = 0;                             // Contador de re-encolados
+                        int expiredCount = 0;                              // Contador de expirados
 
-                        if (waitingJobs != null && waitingJobs.Count > 0)
+                        foreach (var entity in waitingJobs)                // Iterar cada job WAITING
                         {
-                            int expiredCount = 0;                          // Contador de expirados
+                            var job = PrintJob.FromEntity(entity);         // Convertir entidad a PrintJob
 
-                            foreach (var entity in waitingJobs)            // Iterar cada job WAITING
+                            // PRIORIDAD 1: Si la impresora volvió online y disponible → re-encolar
+                            // RAZÓN: La desconexión pudo ser breve (entre ciclos de StatusMonitor)
+                            // y StatusMonitor no detectó la transición OFFLINE→ONLINE.
+                            if (IsPrinterAvailableInDb(job.ImpresoraId))
                             {
-                                var job = PrintJob.FromEntity(entity);     // Convertir entidad a PrintJob
+                                _jobManager.ReEnqueue(job);
+                                LogPrint(job, "RE-ENQUEUED", "Impresora volvió online - reintentando impresión");
+                                requeuedCount++;
+                                continue;                                  // No evaluar expiración
+                            }
+
+                            // PRIORIDAD 2: Impresora sigue offline → verificar expiración
+                            if (expirarDespuesDe > 0)
+                            {
                                 double segundosTranscurridos = (DateTime.Now - job.FechaCreacion).TotalSeconds;
 
                                 if (segundosTranscurridos > expirarDespuesDe) // Superó el tiempo configurado
@@ -153,12 +170,17 @@ namespace PrinterServices.Workers
                                     expiredCount++;                        // Incrementar contador
                                 }
                             }
+                        }
 
-                            if (expiredCount > 0)                          // Loguear solo si hubo expirados
-                            {
-                                Log.WarnFormat("[WORKER-EXPIRATION] {0} job(s) WAITING expirado(s) (superaron {1}s)",
-                                    expiredCount, expirarDespuesDe);
-                            }
+                        if (requeuedCount > 0)                             // Loguear si hubo re-encolados
+                        {
+                            Log.InfoFormat("[WORKER-RETRY] {0} job(s) WAITING re-encolado(s) (impresora volvió online)",
+                                requeuedCount);
+                        }
+                        if (expiredCount > 0)                              // Loguear si hubo expirados
+                        {
+                            Log.WarnFormat("[WORKER-EXPIRATION] {0} job(s) WAITING expirado(s) (superaron {1}s)",
+                                expiredCount, expirarDespuesDe);
                         }
                     }
                 }
@@ -171,10 +193,10 @@ namespace PrinterServices.Workers
                     Log.Error("[WORKER-EXPIRATION] Error en loop de expiración: " + ex.Message, ex);
                 }
 
-                // Esperar 5 segundos antes de la siguiente verificación
-                // RAZÓN: Suficientemente frecuente para detectar expiración rápido (config puede ser 10s),
-                // sin sobrecargar la BD con consultas constantes.
-                try { await Task.Delay(5000, ct); }
+                // Esperar 2 segundos antes de la siguiente verificación
+                // RAZÓN: Suficientemente frecuente para re-encolar jobs WAITING cuando la impresora
+                // vuelve online (desconexiones breves entre ciclos de StatusMonitor).
+                try { await Task.Delay(2000, ct); }
                 catch (OperationCanceledException) { break; }
             }
 
@@ -613,6 +635,28 @@ namespace PrinterServices.Workers
                 return size;                                                  // Valor válido 1-16
             }
             return defaultSize;                                               // Valor inválido → default
+        }
+
+        /// <summary>
+        /// Verifica si una impresora está online y disponible para imprimir consultando la BD.
+        /// RAZÓN: Permite re-encolar jobs WAITING cuando la impresora se reconecta,
+        /// incluso si StatusMonitor no detectó la transición OFFLINE→ONLINE
+        /// (desconexión breve entre ciclos de monitoreo).
+        /// </summary>
+        private bool IsPrinterAvailableInDb(string impresoraId)
+        {
+            try
+            {
+                var results = _db.Query<PrinterEntity>(
+                    "SELECT * FROM printers WHERE impresora_id = ? AND estado_online = 1 AND disponible_para_imprimir = 1",
+                    impresoraId);
+                return results != null && results.Count > 0;
+            }
+            catch (Exception ex)
+            {
+                Log.Debug("[WORKER] Error consultando disponibilidad de impresora " + impresoraId + ": " + ex.Message);
+                return false;
+            }
         }
 
         private void LogPrint(PrintJob job, string estado, string mensaje)

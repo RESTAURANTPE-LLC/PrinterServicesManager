@@ -219,6 +219,14 @@ namespace PrinterServices.Api
             {
                 return null; // Ruta especial: detalle de job por ID
             }
+            if (method == "GET" && path.StartsWith("/api/dashboard/network-history"))
+            {
+                return null; // Ruta especial: historial de alertas de red paginado
+            }
+            if (method == "GET" && path.StartsWith("/api/dashboard/connectivity"))
+            {
+                return null; // Ruta especial: reporte de conectividad de impresoras
+            }
 
             // ── Printer IP Reset (cross-subnet) ──
             if (method == "GET" && path == "/api/printer/resetip")
@@ -308,6 +316,51 @@ namespace PrinterServices.Api
                 }
                 
                 _dashboardController.HandleNotificationHistory(ctx, page, limit);
+                return;
+            }
+
+            // ── Dashboard: Historial de Red ──
+            if (method == "GET" && path.StartsWith("/api/dashboard/network-history"))
+            {
+                var query = ctx.Request.QueryString;
+                int page = 1;
+                int limit = 20;
+                
+                if (!string.IsNullOrEmpty(query["page"]))
+                {
+                    int.TryParse(query["page"], out page);
+                }
+                if (!string.IsNullOrEmpty(query["limit"]))
+                {
+                    int.TryParse(query["limit"], out limit);
+                }
+                
+                _dashboardController.HandleNetworkHistory(ctx, page, limit);
+                return;
+            }
+
+            // ── Dashboard: Reporte de Conectividad ──
+            if (method == "GET" && path.StartsWith("/api/dashboard/connectivity"))
+            {
+                var query = ctx.Request.QueryString;
+                int page = 1;
+                int limit = 50;
+                string impresoraId = null;
+                
+                if (!string.IsNullOrEmpty(query["page"]))
+                {
+                    int.TryParse(query["page"], out page);
+                }
+                if (!string.IsNullOrEmpty(query["limit"]))
+                {
+                    int.TryParse(query["limit"], out limit);
+                }
+                if (!string.IsNullOrEmpty(query["impresora_id"]))
+                {
+                    impresoraId = query["impresora_id"];
+                }
+                
+                _dashboardController.HandleConnectivityReport(ctx, page, limit, impresoraId);
                 return;
             }
 

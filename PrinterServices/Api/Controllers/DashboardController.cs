@@ -358,6 +358,184 @@ namespace PrinterServices.Api.Controllers
         }
 
         /// <summary>
+        /// GET /api/dashboard/network-history?page=1&limit=20 — Historial completo de alertas de red.
+        /// RAZÓN: Ver cuándo cambió la red, cuándo se detectaron problemas de latencia, etc.
+        /// </summary>
+        public void HandleNetworkHistory(HttpListenerContext ctx, int page, int limit)
+        {
+            try
+            {
+                if (page < 1) page = 1;
+                if (limit < 1 || limit > 100) limit = 20;
+
+                int offset = (page - 1) * limit;
+
+                var total = _db.Table<Data.Models.NetworkAlertEntity>().Count();
+
+                var alerts = _db.Table<Data.Models.NetworkAlertEntity>()
+                    .OrderByDescending(a => a.DetectedAt)
+                    .Skip(offset)
+                    .Take(limit)
+                    .Select(a => new
+                    {
+                        alertId = a.AlertId,
+                        alertType = a.AlertType,
+                        severity = a.Severity,
+                        previousGatewayMac = a.PreviousGatewayMac,
+                        currentGatewayMac = a.CurrentGatewayMac,
+                        previousNetworkId = a.PreviousNetworkId,
+                        currentNetworkId = a.CurrentNetworkId,
+                        message = a.Message,
+                        detectedAt = a.DetectedAt.ToString("o"),
+                        notified = a.Notified == 1
+                    })
+                    .ToList();
+
+                // También incluir historial de cambios de IP de impresoras
+                var ipChanges = _db.Table<Data.Models.IpChangeNotificationEntity>()
+                    .OrderByDescending(c => c.FechaCreacion)
+                    .Take(50)
+                    .Select(c => new
+                    {
+                        macAddress = c.MacAddress,
+                        oldIp = c.OldIp,
+                        newIp = c.NewIp,
+                        estado = c.Estado,
+                        fechaCreacion = c.FechaCreacion.ToString("o"),
+                        fechaEnvio = c.FechaEnvio.HasValue ? c.FechaEnvio.Value.ToString("o") : null,
+                        intentos = c.Intentos
+                    })
+                    .ToList();
+
+                var data = new
+                {
+                    page = page,
+                    limit = limit,
+                    total = total,
+                    totalPages = (int)Math.Ceiling((double)total / limit),
+                    alerts = alerts,
+                    ipChanges = ipChanges
+                };
+
+                string json = JsonConvert.SerializeObject(data, Formatting.Indented);
+                byte[] buffer = Encoding.UTF8.GetBytes(json);
+                ctx.Response.ContentType = "application/json; charset=utf-8";
+                ctx.Response.ContentLength64 = buffer.Length;
+                ctx.Response.OutputStream.Write(buffer, 0, buffer.Length);
+                ctx.Response.StatusCode = 200;
+                ctx.Response.Close();
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[DASHBOARD] Error obteniendo historial de red: " + ex.Message, ex);
+                try
+                {
+                    string errorJson = JsonConvert.SerializeObject(new { error = ex.Message });
+                    byte[] errBuf = Encoding.UTF8.GetBytes(errorJson);
+                    ctx.Response.ContentType = "application/json; charset=utf-8";
+                    ctx.Response.StatusCode = 500;
+                    ctx.Response.ContentLength64 = errBuf.Length;
+                    ctx.Response.OutputStream.Write(errBuf, 0, errBuf.Length);
+                    ctx.Response.Close();
+                }
+                catch { ctx.Response.Close(); }
+            }
+        }
+
+        /// <summary>
+        /// GET /api/dashboard/connectivity?page=1&limit=50&impresora_id= — Reporte de conectividad.
+        /// RAZÓN: Ver a qué hora se desconectó una impresora y a qué hora volvió.
+        /// </summary>
+        public void HandleConnectivityReport(HttpListenerContext ctx, int page, int limit, string impresoraIdFilter)
+        {
+            try
+            {
+                if (page < 1) page = 1;
+                if (limit < 1 || limit > 200) limit = 50;
+
+                int offset = (page - 1) * limit;
+
+                // Filtrar por impresora si se especifica
+                List<Data.Models.PrinterStatusLogEntity> logs;
+                int total;
+
+                if (!string.IsNullOrEmpty(impresoraIdFilter))
+                {
+                    total = _db.Table<Data.Models.PrinterStatusLogEntity>()
+                        .Where(l => l.ImpresoraId == impresoraIdFilter)
+                        .Count();
+                    logs = _db.Table<Data.Models.PrinterStatusLogEntity>()
+                        .Where(l => l.ImpresoraId == impresoraIdFilter)
+                        .OrderByDescending(l => l.Fecha)
+                        .Skip(offset)
+                        .Take(limit)
+                        .ToList();
+                }
+                else
+                {
+                    total = _db.Table<Data.Models.PrinterStatusLogEntity>().Count();
+                    logs = _db.Table<Data.Models.PrinterStatusLogEntity>()
+                        .OrderByDescending(l => l.Fecha)
+                        .Skip(offset)
+                        .Take(limit)
+                        .ToList();
+                }
+
+                var items = logs.Select(l => new
+                {
+                    id = l.Id,
+                    impresoraId = l.ImpresoraId,
+                    impresoraNombre = l.ImpresoraNombre,
+                    impresoraIp = l.ImpresoraIp,
+                    macAddress = l.MacAddress,
+                    estadoAnterior = l.EstadoAnterior,
+                    estadoNuevo = l.EstadoNuevo,
+                    detalle = l.Detalle,
+                    fecha = l.Fecha
+                }).ToList();
+
+                // Lista de impresoras para filtro en el frontend
+                var printerList = _db.Table<Data.Models.PrinterEntity>()
+                    .OrderBy(p => p.Nombre)
+                    .Select(p => new { id = p.ImpresoraId, nombre = p.Nombre })
+                    .ToList();
+
+                var data = new
+                {
+                    page = page,
+                    limit = limit,
+                    total = total,
+                    totalPages = (int)Math.Ceiling((double)total / limit),
+                    items = items,
+                    printers = printerList
+                };
+
+                string json = JsonConvert.SerializeObject(data, Formatting.Indented);
+                byte[] buffer = Encoding.UTF8.GetBytes(json);
+                ctx.Response.ContentType = "application/json; charset=utf-8";
+                ctx.Response.ContentLength64 = buffer.Length;
+                ctx.Response.OutputStream.Write(buffer, 0, buffer.Length);
+                ctx.Response.StatusCode = 200;
+                ctx.Response.Close();
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[DASHBOARD] Error obteniendo reporte de conectividad: " + ex.Message, ex);
+                try
+                {
+                    string errorJson = JsonConvert.SerializeObject(new { error = ex.Message });
+                    byte[] errBuf = Encoding.UTF8.GetBytes(errorJson);
+                    ctx.Response.ContentType = "application/json; charset=utf-8";
+                    ctx.Response.StatusCode = 500;
+                    ctx.Response.ContentLength64 = errBuf.Length;
+                    ctx.Response.OutputStream.Write(errBuf, 0, errBuf.Length);
+                    ctx.Response.Close();
+                }
+                catch { ctx.Response.Close(); }
+            }
+        }
+
+        /// <summary>
         /// Recopila toda la información del sistema para el dashboard.
         /// RAZÓN: Single source of truth para el estado completo.
         /// </summary>
