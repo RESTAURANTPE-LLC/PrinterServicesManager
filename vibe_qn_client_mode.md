@@ -761,6 +761,72 @@ Job 714 DONE → notifica a 10.0.0.100 ✅ + intenta 10.0.0.6:8081 ❌ connectio
 9. **FeatureFlag USAR_PRINTER_SERVICE: Solo el FRONT lo valida** — El Backend (Controllers, Servers, PrinterServiceClient) **NO verifica** si la terminal es servidor o cliente. El parámetro `ipClienteRest` viaja como dato transparente por toda la cadena sin importar el rol. El FeatureFlag `USAR_PRINTER_SERVICE` solo lo evalúa el **Front** (Presenters) para decidir si mostrar modales de PrinterServices o imprimir localmente. Tanto terminales servidor como cliente activan el flag en el Front si está configurado — la diferencia es que el servidor llama al Controller directo y el cliente llama via REST, pero ambos terminan en el mismo Controller con el mismo `ipClienteRest`.
 10. **Código nuevo NO rompe lo existente** — Todo parámetro nuevo es **opcional con default vacío** (`string ipClienteRest = ""`). Si un caller existente no pasa el parámetro, el flujo funciona exactamente igual que antes (`ip_origen` = IP del servidor). Solo cuando el endpoint HTTP pasa un `ipClienteRest` diferente de vacío, el comportamiento cambia.
 
+11. **⚠️ CRÍTICO — Checklist obligatorio para CADA endpoint que genera impresión via PrinterServices:**
+
+    Cuando un Controller delega impresión a PrinterServices (directamente o via `ServerImpresionService`), los `PrintJobResults` deben propagarse por **4 capas obligatorias**. Si CUALQUIERA de estas capas falta, el cliente recibirá `PrintJobResults = null` y el modal de progreso no aparecerá (mostrará falso error de impresión).
+
+    **Las 4 capas son:**
+
+    | # | Capa | Archivo | Qué debe hacer | Ejemplo correcto |
+    |---|---|---|---|---|
+    | 1 | **Controller** | `*Controller.cs` | Leer `PrintJobResults` del resultado de PS y asignar a `respuestaFinal.PrintJobResults` | `respuestaFinal.PrintJobResults = printJobResultsParaRespuesta;` |
+    | 2 | **Server** | `*Server.cs` | Serializar `respuesta.PrintJobResults` como JSON array con `job_id`, `tipo`, `pedido_ids` | `jsonObject.Add("printJobResults", jrArray);` |
+    | 3 | **WebServer** | `WebServer_New.cs` | Extraer `ipClienteRest` con `GetClientIp()` y pasarlo al Server | `var ipClienteRest = GetClientIp(this.Request) ?? "";` |
+    | 4 | **Client** | `*Client.cs` | Parsear `printJobResults` del JSON, registrar en `PrintJobStatusManager`, asignar a `respuesta.PrintJobResults` | `respuesta.PrintJobResults = printJobResults;` |
+
+    **Además en `PrinterServiceClient.cs`:** El método `ParseSuccessResponse` debe setear **AMBAS** propiedades: `respuesta.Data = jobResults` Y `respuesta.PrintJobResults = jobResults`. La propiedad `Data` es para el Controller (cast a `List<PrintJobResult>`), la propiedad `PrintJobResults` es para propagación directa. Si solo se setea `Data`, cualquier código que lea `PrintJobResults` directamente verá null.
+
+    **Bug real encontrado (2026-03-18):** `generarVentaEImpresionDelivery` tenía la capa 1 (Controller) correcta pero las capas 2, 3 y 4 faltaban por completo. El Controller generaba los `PrintJobResults` correctamente, pero el Server no los serializaba, el WebServer no propagaba `ipClienteRest`, y el Client no los parseaba. Resultado: el Front siempre recibía `PrintJobResults = null` → modal de error falso.
+
+    **Para prevenir este hueco:** Cada vez que se agregue un nuevo endpoint que llame a `PrinterServiceClient` o `ServerImpresionService`, verificar las 4 capas con este checklist antes de dar por terminado.
+
+12. **⚠️ CRÍTICO — Dispatcher obligatorio y tiempo mínimo de visibilidad en modales de PrinterServices (Front WPF):**
+
+    Los métodos `showImprimiendoPrinterService`, `showFailedPrinterService` y cualquier método que cree una `Window` WPF en el flujo de impresión **DEBEN ejecutarse en el UI thread** usando `Application.Current.Dispatcher.BeginInvoke`. Esto es porque los Presenters invocan estos métodos desde **callbacks REST** (hilo de fondo/thread pool). Si se crea una `Window` en un background thread, WPF la asocia a un dispatcher diferente y la ventana **NO se renderiza** — queda invisible aunque tenga `Topmost="True"`.
+
+    **Patrón obligatorio para todo `showImprimiendoPrinterService`:**
+
+    ```csharp
+    public void showImprimiendoPrinterService(Action onSuccess, Action onFail, int cantidadJobs = 0)
+    {
+        // ⚠️ SIEMPRE envolver en Dispatcher — el Presenter llama desde hilo de fondo (callback REST)
+        Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            try
+            {
+                var psProgress = new PSProgressService(cantidadJobs);
+                var modalImprimiendo = new CustomModalImprimiendoNewView(psProgress);
+                // ... suscribir Completado, Show(), posicionar ...
+            }
+            catch (Exception ex) { /* log */ }
+        }));
+    }
+    ```
+
+    **Además — Tiempo mínimo de visibilidad (`MIN_DISPLAY_MS = 1800`):**
+
+    `PSProgressService` garantiza que el modal de progreso sea visible **al menos 1.8 segundos** antes de disparar el evento `Completado`. Esto resuelve la race condition donde PrinterServices responde en <5ms y los jobs ya están `DONE` antes de crear el modal. Sin este mínimo, el modal aparecía y desaparecía instantáneamente (o ni se mostraba).
+
+    - En el **constructor** de `PSProgressService`: si los jobs ya terminaron, NO marca `_finalizado = true`. Programa un `DispatcherTimer` de `MIN_DISPLAY_MS` antes de disparar `Completado`.
+    - En **`OnAllJobsDone`**: calcula `elapsed` desde `_inicio`. Si `elapsed < MIN_DISPLAY_MS`, espera el tiempo restante. Si ya pasó, usa delay de 800ms.
+    - Los callers **NO deben usar** `YaFinalizado` como early-exit para saltar el modal. El modal siempre se crea y se muestra.
+
+    **Bug real encontrado (2026-03-18):** 5 de 6 implementaciones de `showImprimiendoPrinterService` creaban la `Window` directamente sin `Dispatcher.BeginInvoke`. Como los Presenters llaman desde callbacks REST (thread pool), las ventanas se creaban en background threads y eran invisibles. Solo `FragmentDetallePedido.cs` tenía el Dispatcher correcto.
+
+    **Archivos corregidos:**
+
+    | Archivo | Fix |
+    |---|---|
+    | `DeliverysConfirmadosNew.cs` | Agregado `Dispatcher.BeginInvoke` |
+    | `ResumenDelivery.cs` | Agregado `Dispatcher.BeginInvoke` |
+    | `ListaDeliveryPendiente.cs` | Agregado `Dispatcher.BeginInvoke` |
+    | `ListaPedidosTemporales.cs` | Agregado `Dispatcher.BeginInvoke` |
+    | `FragmentOpcionesItemDeliveryNewView.xaml.cs` | Agregado `Dispatcher.BeginInvoke` |
+    | `FragmentDetallePedido.cs` | Ya lo tenía ✅ |
+    | `PSProgressService.cs` | Agregado `MIN_DISPLAY_MS = 1800` + timer mínimo |
+
+    **Para prevenir en futuras implementaciones:** Cada vez que se cree un nuevo `showImprimiendoPrinterService` o similar, **SIEMPRE** envolver el cuerpo completo en `Application.Current.Dispatcher.BeginInvoke` y **NUNCA** usar `YaFinalizado` como early-exit.
+
 ---
 
 ## 10. Métricas de éxito

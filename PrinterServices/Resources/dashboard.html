@@ -388,8 +388,8 @@
                         <p class="text-sm text-red-400">${job.errorMensaje || 'Sin errores'}</p>
                     </div>
                     <div class="bg-gray-700 p-4 rounded col-span-2">
-                        <p class="text-sm text-gray-400 mb-2">Contenido (primeros 500 chars)</p>
-                        <pre class="text-xs bg-gray-900 p-2 rounded overflow-x-auto">${job.contenido ? job.contenido.substring(0, 500) : '-'}</pre>
+                        <p class="text-sm text-gray-400 mb-2">Contenido</p>
+                        <pre class="text-xs bg-gray-900 p-2 rounded overflow-x-auto max-h-96 overflow-y-auto">${job.contenido ? job.contenido : '-'}</pre>
                     </div>
                 `;
                 
@@ -501,7 +501,7 @@
             if (!item) return;
 
             const contenidoPreview = item.contenido
-                ? item.contenido.substring(0, 2000)
+                ? item.contenido
                 : '(Sin contenido disponible)';
 
             document.getElementById('notif-content-detail').innerHTML = `

@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.Reflection;
 using Topshelf;
 using Topshelf.Logging;
 
@@ -8,6 +10,12 @@ namespace PrinterServices
     {
         static void Main(string[] args)
         {
+            // Fijar el directorio de trabajo al directorio del exe
+            // RAZÓN: Cuando corre como servicio Windows, el working dir es C:\Windows\System32
+            // y no encuentra log4net.config ni otros archivos relativos al exe.
+            var exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+            Directory.SetCurrentDirectory(exeDir);
+
             HostFactory.Run(x =>
             {
                 x.Service<PrinterServicesHost>(s =>
@@ -19,10 +27,10 @@ namespace PrinterServices
 
                 x.RunAsLocalSystem();
                 x.SetDescription("Servicio centralizado de impresión ESC/POS para Quipunet");
-                x.SetDisplayName("PrinterServices");
-                x.SetServiceName("PrinterServices");
+                x.SetDisplayName("Printer Services LCA");
+                x.SetServiceName("PrinterServicesLCA");
 
-                //x.UseLog4Net("log4net.config");
+                x.UseLog4Net("log4net.config");
 
                 x.EnableServiceRecovery(r =>
                 {
@@ -32,6 +40,7 @@ namespace PrinterServices
                     r.SetResetPeriod(1); // Resetear contador de fallos después de 1 día
                 });
 
+                x.SetStartTimeout(TimeSpan.FromSeconds(120));
                 x.StartAutomatically();
             });
         }

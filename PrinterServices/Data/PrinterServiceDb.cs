@@ -30,7 +30,7 @@ namespace PrinterServices.Data
                     return _instance;
                 }
 
-                string folder = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                string folder = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
                 string specificFolder = Path.Combine(folder, "QuipuNet");
                 Directory.CreateDirectory(specificFolder);
 
@@ -186,7 +186,11 @@ namespace PrinterServices.Data
                 Execute("CREATE INDEX IF NOT EXISTS idx_jobs_impresora ON print_jobs(impresora_id)");
                 Execute("CREATE INDEX IF NOT EXISTS idx_notif_device ON notifications(device_id, entregada)");
                 Execute("CREATE INDEX IF NOT EXISTS idx_log_fecha ON print_log(fecha)");
-                Execute("CREATE INDEX IF NOT EXISTS idx_printers_mac ON printers(mac_address)");
+                // UNIQUE index: una MAC física = una sola impresora en BD.
+                // SQLite permite múltiples NULLs en UNIQUE, así que impresoras sin MAC no conflictúan.
+                // Migración: eliminar índice viejo no-unique si existe, crear el nuevo UNIQUE.
+                try { Execute("DROP INDEX IF EXISTS idx_printers_mac"); } catch { }
+                Execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_printers_mac_unique ON printers(mac_address)");
                 Execute("CREATE INDEX IF NOT EXISTS idx_notif_estado ON notificacionescambiosip(estado)");
                 Execute("CREATE INDEX IF NOT EXISTS idx_notif_mac ON notificacionescambiosip(mac_address)");
 

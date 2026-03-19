@@ -5181,3 +5181,114 @@ Todos siguen el mismo patrón: `showImprimiendoPrinterService(onSuccess, onFail,
 **Línea**: 626
 **Cambio**: `if (usarPS)` → `if (usarPS || servidorTienePS)`
 **Efecto**: En modo cliente, la cabecera ya no abre un modal propio cuando PrinterServices está activo en el servidor remoto.
+
+---
+
+## 34. Bug: Doble bloque PS en flujo Delivery — PrintJobResults perdidos
+
+### 34.1 Síntoma
+
+Al pagar un delivery confirmado (`btnPagar` → `generarVentaEImpresionDelivery`), el modal de progreso de impresión y el modal de éxito **nunca aparecían** en modo servidor con `USAR_PRINTER_SERVICE=true`. PrinterServices **sí imprimía** correctamente (el callback WebSocket llegaba con `status=DONE`), pero el Front recibía `PrintJobResults=NULL`.
+
+### 34.2 Diagnóstico (logs [DIAG-PS])
+
+```
+[DIAG-PS-CTRL] Impresiones: comprobante=NULL, sorteo=NULL, encuesta=NULL, motorizado=NULL
+[DIAG-PS-CTRL] resultadoPS=SI, Success=True, PrintJobResults=0
+[DIAG-PS-CTRL] WARNING: resultadoPS.Success=true pero PrintJobResults vacío o null
+[DIAG-PS] Callback recibido: Tipo=1, PrintJobResults=NULL
+[DIAG-PS] verificarPrintJobsPorVenta: PrintJobResults=NULL, Count=0
+```
+
+PS procesó el job (`[PSModaFallida.OnExternal] jobId=... newStatus=DONE`), pero el Presenter recibía `PrintJobResults=NULL` → no entraba al `showImprimiendoPrinterService`.
+
+### 34.3 Root Cause: Doble bloque PS
+
+La cadena de llamadas era:
+
+```
+DeliveryController.generarVentaEImpresionDelivery()
+  └→ VentaController.agregarVentaDelivery()
+       └→ VentaController.addVentaDeliveryMovil()   ← TIENE bloque PS (correcto)
+            ├→ Envía 4 impresiones a PS via ServerDeliveryStrategy ✅
+            ├→ Limpia impresiones a null ✅
+            ├→ Retorna PrintJobResults en Respuesta ✅
+            └→ return respuesta_ (con PrintJobResults)
+  └→ Lee respuestaHacerVentaDelivery.Impresion       → NULL (limpiada por inner PS)
+  └→ Lee respuestaHacerVentaDelivery.ImpresionSorteo  → NULL
+  └→ Lee respuestaHacerVentaDelivery.ImpresionEncuesta → NULL
+  └→ Lee respuestaHacerVentaDelivery.ImpresionMotorizado → NULL
+  └→ ❌ NO lee respuestaHacerVentaDelivery.PrintJobResults  ← BUG
+  └→ Entra a SEGUNDO bloque PS (redundante)
+       ├→ Crea ImpresionContext con 4 impresiones NULL
+       ├→ ServerDeliveryStrategy no envía nada → todosLosJobs=[]
+       ├→ PrintResultDto.Success=true, PrintJobResults.Count=0
+       └→ printJobResultsParaRespuesta queda null
+  └→ Retorna Respuesta con PrintJobResults=NULL al Front
+```
+
+**El hueco**: `DeliveryController` no propagaba `PrintJobResults` desde la respuesta interna de `addVentaDeliveryMovil`, y tenía un bloque PS redundante que intentaba reenviar impresiones que ya eran null.
+
+**Bug adicional**: `DeliveryController` no reenviaba `ipClienteRest` a `agregarVentaDelivery`, por lo que PS no sabía qué terminal originó la impresión.
+
+### 34.4 Fix aplicado
+
+**Archivo**: `QuipuNetX/controller/DeliveryController.cs` — método `generarVentaEImpresionDelivery`
+
+3 cambios:
+
+1. **Forward `ipClienteRest`** a `agregarVentaDelivery`:
+```csharp
+// ANTES (bug):
+VentaController.agregarVentaDelivery(..., caja_id);
+// DESPUÉS (fix):
+VentaController.agregarVentaDelivery(..., caja_id, ipClienteRest);
+```
+
+2. **Propagar `PrintJobResults`** desde la respuesta interna:
+```csharp
+// Después de leer Impresion, ImpresionSorteo, etc.:
+if (respuestaHacerVentaDelivery.PrintJobResults != null 
+    && respuestaHacerVentaDelivery.PrintJobResults.Count > 0)
+{
+    printJobResultsParaRespuesta = new List<PrintJobResult>(
+        respuestaHacerVentaDelivery.PrintJobResults);
+}
+```
+
+3. **Eliminar bloque PS redundante** — `addVentaDeliveryMovil` ya maneja todo el ciclo (enviar a PS, vaciar impresiones, retornar PrintJobResults).
+
+### 34.5 Regla para prevenir este hueco
+
+**⚠️ REGLA: Cuando un Controller llama a OTRO Controller que ya tiene bloque PS, NO duplicar el bloque PS en el caller.**
+
+El caller debe:
+1. **Propagar `PrintJobResults`** desde la `Respuesta` del inner Controller
+2. **Forwarded `ipClienteRest`** al inner Controller
+3. **NO crear un segundo bloque PS** — las impresiones ya fueron enviadas y limpiadas
+
+Patrón correcto:
+```csharp
+Respuesta respuestaInterna = OtroController.metodoQueYaTienePS(..., ipClienteRest);
+if (respuestaInterna.Tipo == SUCCESS)
+{
+    // Leer impresiones (serán null si inner PS las limpió, non-null si flag OFF)
+    impresion = respuestaInterna.Impresion;
+    // SIEMPRE propagar PrintJobResults del inner Controller
+    if (respuestaInterna.PrintJobResults != null && respuestaInterna.PrintJobResults.Count > 0)
+    {
+        printJobResultsParaRespuesta = new List<PrintJobResult>(respuestaInterna.PrintJobResults);
+    }
+}
+// NO agregar bloque PS aquí — el inner Controller ya lo hizo
+```
+
+### 34.6 Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `QuipuNetX/controller/DeliveryController.cs` | Forward `ipClienteRest`, propagar `PrintJobResults`, eliminar bloque PS redundante |
+
+### 34.7 Relación con regla 11 de vibe_qn_client_mode.md
+
+La regla 11 (4 capas de propagación de PrintJobResults) sigue vigente para el flujo **Controller → Server → WebServer → Client**. Este bug era una **capa 0** previa: la propagación **Controller → Controller** cuando hay delegación interna. La regla 11 asume que el Controller final ya tiene `PrintJobResults` correctos — este bug impedía que eso ocurriera.

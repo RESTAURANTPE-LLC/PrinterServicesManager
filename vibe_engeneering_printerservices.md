@@ -4328,3 +4328,167 @@ Hasta ahora, **no había visibilidad** de estos callbacks en el dashboard. El op
 **Paginación independiente** con botones indigo (no interfiere con la paginación azul del historial de impresiones).
 
 ---
+
+## 23. Deduplicación de Impresoras por MAC Address
+
+### 23.1 Problema
+
+El dashboard mostraba impresoras duplicadas: el mismo dispositivo físico aparecía como dos entradas diferentes (ej: "PRINTER 1" y "PRINTER1") con la misma IP pero diferente `impresora_id`. Esto ocurría porque:
+
+1. QuipuNetX registraba la impresora con un ID (ej: `printer_1`) vía `/api/printers/sync`
+2. Luego la re-registraba con otro ID (ej: `printer1`) vía `/api/printer/register`
+3. `PrinterMacEnricher` descubría la MAC para una de las entradas, pero la otra quedaba sin MAC
+4. Ambas coexistían en BD porque el lookup era solo por `impresora_id` (PK), no por MAC
+
+**Regla de negocio**: Una MAC física = un solo dispositivo = una sola fila en `printers`.
+
+### 23.2 Solución: Dedup por MAC en todos los puntos de entrada
+
+Se agregó verificación de MAC duplicada en **5 puntos** donde se insertan o actualizan impresoras:
+
+| Punto de entrada | Archivo | Método | Branch |
+|---|---|---|---|
+| Registro individual | `PrinterController.cs` | `RegisterPrinter()` | INSERT |
+| Registro individual | `PrinterController.cs` | `RegisterPrinter()` | UPDATE |
+| Sync bulk | `PrinterController.cs` | `SyncPrinters()` | INSERT |
+| Sync bulk | `PrinterController.cs` | `SyncPrinters()` | UPDATE |
+| Enriquecimiento ARP | `PrinterMacEnricher.cs` | `TryEnrichMac()` | Descubrimiento |
+
+**Lógica de dedup** (idéntica en los 5 puntos):
+```csharp
+if (!string.IsNullOrEmpty(printer.MacAddress))
+{
+    var macDuplicate = _db.Query<PrinterEntity>(
+        "SELECT * FROM printers WHERE mac_address = ? AND impresora_id != ?",
+        printer.MacAddress, currentImpresoraId).FirstOrDefault();
+    if (macDuplicate != null)
+    {
+        _db.Delete<PrinterEntity>(macDuplicate.ImpresoraId);
+        Log.WarnFormat("[PRINTER] Duplicado por MAC eliminado: {0} → reemplazado por {1}",
+            macDuplicate.ImpresoraId, currentImpresoraId);
+    }
+}
+```
+
+### 23.3 Índice UNIQUE en BD
+
+Se migró el índice `idx_printers_mac` de regular a **UNIQUE** como safety net a nivel de BD:
+
+```sql
+DROP INDEX IF EXISTS idx_printers_mac;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_printers_mac_unique ON printers(mac_address);
+```
+
+**SQLite permite múltiples NULLs en UNIQUE**, así que impresoras sin MAC descubierta no conflictúan entre sí.
+
+### 23.4 Flujo completo de dedup
+
+```
+QuipuNetX sync → POST /api/printers/sync
+    ├─ Printer "PRINTER 1" (id=p1, ip=192.168.10.165, mac=null) → INSERT OK
+    └─ Printer "PRINTER1"  (id=p2, ip=192.168.10.165, mac=null) → INSERT OK (diferente PK)
+
+StatusMonitor ciclo → PrinterMacEnricher.TryEnrichMac()
+    ├─ p1: ARP(192.168.10.165) → MAC=2B0E8BC96279 → guardar
+    └─ p2: ARP(192.168.10.165) → MAC=2B0E8BC96279 → ¡DEDUP!
+         → Detecta que p1 ya tiene MAC=2B0E8BC96279
+         → DELETE p1 (duplicado)
+         → UPDATE p2 con MAC=2B0E8BC96279
+         → Dashboard muestra solo "PRINTER1"
+```
+
+### 23.5 Archivos modificados
+
+| Archivo | Cambio |
+|---|---|
+| `Api/Controllers/PrinterController.cs` | Dedup por MAC en `RegisterPrinter()` y `SyncPrinters()` (INSERT + UPDATE) |
+| `Services/Printers/PrinterMacEnricher.cs` | Dedup por MAC en `TryEnrichMac()` al descubrir MAC vía ARP |
+| `Data/PrinterServiceDb.cs` | Migración: `idx_printers_mac` → `idx_printers_mac_unique` (UNIQUE) |
+
+---
+
+## 24. Acoplamiento Front WPF ↔ PrinterServices — Reglas de UI Thread y UX
+
+> **Estado**: ✅ IMPLEMENTADO — 2026-03-18
+
+### 24.1 Problema: Modales invisibles por creación en background thread
+
+Cuando PrinterServices procesa un job de impresión, el Front WPF de QuipuNet muestra un modal de progreso (`CustomModalImprimiendoNewView`) con barra de progreso en tiempo real. Este modal se crea desde `showImprimiendoPrinterService` en las Views.
+
+**El bug:** Los Presenters invocan `showImprimiendoPrinterService` desde **callbacks REST** (RestSharp `ExecuteAsync`), que ejecutan en un **thread pool thread** (no UI). En WPF, crear una `Window` en un background thread la asocia a un dispatcher diferente al principal → la ventana **NO se renderiza** — queda invisible aunque tenga `Topmost="True"` en XAML.
+
+### 24.2 Regla: Dispatcher obligatorio
+
+**Todo método que cree una `Window` WPF en el flujo de impresión DEBE envolver su cuerpo en `Application.Current.Dispatcher.BeginInvoke`.**
+
+Aplica a:
+- `showImprimiendoPrinterService` (modal de progreso)
+- `showFailedPrinterService` (modal de error/reintento)
+- `showSuccessPrinterService` (modal de éxito)
+- Cualquier futuro método que cree ventanas WPF desde callbacks de PrinterServices
+
+```csharp
+// ✅ CORRECTO — Window se crea en UI thread
+public void showImprimiendoPrinterService(Action onSuccess, Action onFail, int cantidadJobs = 0)
+{
+    Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+    {
+        try
+        {
+            var psProgress = new PSProgressService(cantidadJobs);
+            var modal = new CustomModalImprimiendoNewView(psProgress);
+            // ... suscribir eventos, Show(), posicionar ...
+        }
+        catch (Exception ex) { /* log */ }
+    }));
+}
+
+// ❌ INCORRECTO — Window se crea en thread pool (invisible)
+public void showImprimiendoPrinterService(Action onSuccess, Action onFail, int cantidadJobs = 0)
+{
+    var psProgress = new PSProgressService(cantidadJobs);
+    var modal = new CustomModalImprimiendoNewView(psProgress); // ← BUG: background thread
+    modal.Show(); // ← No se ve
+}
+```
+
+### 24.3 Regla: Tiempo mínimo de visibilidad (MIN_DISPLAY_MS)
+
+PrinterServices puede responder en **<5ms** (event-driven con SemaphoreSlim, ver sección 0). Esto causa que los callbacks `DONE`/`FAILED` lleguen al Front **antes** de que el modal de progreso se muestre, generando una de dos situaciones:
+
+1. **Modal no se muestra** — los jobs ya están `DONE` al crear `PSProgressService`, se marcaba `_finalizado = true` y el caller saltaba el modal.
+2. **Modal aparece y desaparece instantáneamente** — el evento `Completado` cierra el modal antes de que el usuario lo perciba.
+
+**Solución implementada en `PSProgressService`:**
+
+```
+Constante: MIN_DISPLAY_MS = 1800 (1.8 segundos)
+
+Constructor: Si jobs ya terminaron → NO marcar _finalizado
+             → Programar DispatcherTimer de MIN_DISPLAY_MS antes de Completado
+
+OnAllJobsDone: elapsed = (DateTime.Now - _inicio).TotalMilliseconds
+               Si elapsed < MIN_DISPLAY_MS → delay = MIN_DISPLAY_MS - elapsed
+               Si elapsed >= MIN_DISPLAY_MS → delay = 800ms (para ver 100%)
+```
+
+**Resultado UX:**
+
+| Velocidad PS | Antes | Después |
+|---|---|---|
+| <5ms | Modal invisible | Modal visible 1.8s con barra verde 100% |
+| ~500ms | Modal flash imperceptible | Modal visible 1.8s con progreso real |
+| >2s | Modal normal con progreso | Sin cambio (delay 800ms al final) |
+
+### 24.4 Checklist para nuevas pantallas con impresión PS
+
+Al crear un nuevo flujo de impresión que use PrinterServices en el Front WPF:
+
+- [ ] `showImprimiendoPrinterService` envuelto en `Application.Current.Dispatcher.BeginInvoke`
+- [ ] `showFailedPrinterService` envuelto en `Application.Current.Dispatcher.BeginInvoke`
+- [ ] NO usar `psProgress.YaFinalizado` como early-exit para saltar el modal
+- [ ] Pasar `cantidadJobs` al constructor de `PSProgressService` (evita race condition)
+- [ ] Modal posicionado en esquina inferior derecha (`SystemParameters.WorkArea`)
+- [ ] `try/catch` con NLog para capturar excepciones dentro del Dispatcher
+
+---

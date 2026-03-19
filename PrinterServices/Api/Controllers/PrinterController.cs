@@ -132,6 +132,21 @@ namespace PrinterServices.Api.Controllers
                         existing.Puerto = puerto;
                     }
 
+                    // Dedup por MAC: si otra impresora ya tiene la misma MAC, es el mismo dispositivo físico
+                    // → eliminar la entrada vieja para evitar duplicados en el dashboard
+                    if (!string.IsNullOrEmpty(existing.MacAddress))
+                    {
+                        var macDuplicate = _db.Query<PrinterEntity>(
+                            "SELECT * FROM printers WHERE mac_address = ? AND impresora_id != ?",
+                            existing.MacAddress, impresoraId).FirstOrDefault();
+                        if (macDuplicate != null)
+                        {
+                            _db.Delete<PrinterEntity>(macDuplicate.ImpresoraId);
+                            Log.WarnFormat("[PRINTER] Duplicado por MAC eliminado en update: {0} ({1}) → reemplazado por {2}",
+                                macDuplicate.ImpresoraId, macDuplicate.Nombre, impresoraId);
+                        }
+                    }
+
                     _db.Update(existing);
 
                     Log.InfoFormat("[PRINTER] Impresora actualizada: {0} ({1}) en {2}", impresoraId, existing.Nombre, ip);
@@ -156,6 +171,21 @@ namespace PrinterServices.Api.Controllers
                     if (!string.IsNullOrEmpty(puertoStr) && int.TryParse(puertoStr, out puerto))
                     {
                         printer.Puerto = puerto;
+                    }
+
+                    // Dedup por MAC: si otra impresora ya tiene la misma MAC, es el mismo dispositivo físico
+                    // → eliminar la entrada vieja para evitar duplicados en el dashboard
+                    if (!string.IsNullOrEmpty(printer.MacAddress))
+                    {
+                        var macDuplicate = _db.Query<PrinterEntity>(
+                            "SELECT * FROM printers WHERE mac_address = ? AND impresora_id != ?",
+                            printer.MacAddress, impresoraId).FirstOrDefault();
+                        if (macDuplicate != null)
+                        {
+                            _db.Delete<PrinterEntity>(macDuplicate.ImpresoraId);
+                            Log.WarnFormat("[PRINTER] Duplicado por MAC eliminado: {0} ({1}) → reemplazado por {2}",
+                                macDuplicate.ImpresoraId, macDuplicate.Nombre, impresoraId);
+                        }
                     }
 
                     _db.Insert(printer);
@@ -231,6 +261,21 @@ namespace PrinterServices.Api.Controllers
                         existing.MacAddress = dto.mac_address ?? existing.MacAddress; // Actualizar MAC (si viene)
                         // NOTA: NO actualizar estado online/offline - eso lo maneja StatusMonitor
 
+                        // Dedup por MAC: si otra impresora ya tiene la misma MAC, es el mismo dispositivo físico
+                        // → eliminar la entrada vieja para evitar duplicados en el dashboard
+                        if (!string.IsNullOrEmpty(existing.MacAddress))
+                        {
+                            var macDuplicate = _db.Query<PrinterEntity>(
+                                "SELECT * FROM printers WHERE mac_address = ? AND impresora_id != ?",
+                                existing.MacAddress, dto.impresora_id).FirstOrDefault();
+                            if (macDuplicate != null)
+                            {
+                                _db.Delete<PrinterEntity>(macDuplicate.ImpresoraId);
+                                Log.WarnFormat("[PRINTER-SYNC] Duplicado por MAC eliminado en update: {0} ({1}) → reemplazado por {2}",
+                                    macDuplicate.ImpresoraId, macDuplicate.Nombre, dto.impresora_id);
+                            }
+                        }
+
                         _db.Update(existing); // Ejecutar UPDATE en BD
                         updatedCount++; // Incrementar contador de actualizados
 
@@ -256,6 +301,21 @@ namespace PrinterServices.Api.Controllers
                             TapaAbierta = 0, // Default: asumimos tapa cerrada
                             IpResueltaPorArp = 0 // Default: no resuelta por ARP
                         };
+
+                        // Dedup por MAC: si otra impresora ya tiene la misma MAC, es el mismo dispositivo físico
+                        // → eliminar la entrada vieja para evitar duplicados en el dashboard
+                        if (!string.IsNullOrEmpty(newPrinter.MacAddress))
+                        {
+                            var macDuplicate = _db.Query<PrinterEntity>(
+                                "SELECT * FROM printers WHERE mac_address = ? AND impresora_id != ?",
+                                newPrinter.MacAddress, dto.impresora_id).FirstOrDefault();
+                            if (macDuplicate != null)
+                            {
+                                _db.Delete<PrinterEntity>(macDuplicate.ImpresoraId);
+                                Log.WarnFormat("[PRINTER-SYNC] Duplicado por MAC eliminado: {0} ({1}) → reemplazado por {2}",
+                                    macDuplicate.ImpresoraId, macDuplicate.Nombre, dto.impresora_id);
+                            }
+                        }
 
                         _db.Insert(newPrinter); // Ejecutar INSERT en BD
                         insertedCount++; // Incrementar contador de insertados

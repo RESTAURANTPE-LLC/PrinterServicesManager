@@ -1720,7 +1720,7 @@ namespace PSQLite
             {
                 int? len = p.MaxStringLength;
                 if (len.HasValue) return "varchar(" + len.Value + ")";
-                return "varchar";
+                return "text";
             }
             if (clrType == typeof(TimeSpan)) return "bigint";
             if (clrType == typeof(DateTime)) return storeDateTimeAsTicks ? "bigint" : "varchar";

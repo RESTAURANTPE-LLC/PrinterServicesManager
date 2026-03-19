@@ -93,6 +93,18 @@ namespace PrinterServices.Services.Printers
                     return false;
                 }
 
+                // Dedup por MAC: si otra impresora ya tiene la misma MAC, es el mismo dispositivo físico
+                // → eliminar la entrada vieja para evitar duplicados en el dashboard
+                var macDuplicate = _db.Query<PrinterEntity>(
+                    "SELECT * FROM printers WHERE mac_address = ? AND impresora_id != ?",
+                    normalizedMac, printer.ImpresoraId).FirstOrDefault();
+                if (macDuplicate != null)
+                {
+                    _db.Delete<PrinterEntity>(macDuplicate.ImpresoraId);
+                    Log.WarnFormat("[MAC-ENRICH] Duplicado por MAC eliminado: {0} ({1}) → reemplazado por {2}",
+                        macDuplicate.ImpresoraId, macDuplicate.Nombre, printer.ImpresoraId);
+                }
+
                 // Asignar MAC normalizada a la entidad
                 // RAZÓN: Actualizar objeto en memoria antes de persistir
                 printer.MacAddress = normalizedMac;
