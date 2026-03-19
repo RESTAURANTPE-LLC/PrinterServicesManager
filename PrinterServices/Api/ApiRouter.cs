@@ -135,6 +135,15 @@ namespace PrinterServices.Api
             {
                 return _jobController.GetPendingJobs();
             }
+            // Retry DEBE evaluarse ANTES de las rutas genéricas GET/DELETE /api/job/{id}
+            // RAZÓN: GET /api/job/{id} captura /api/job/{id}/retry como jobId="{id}/retry" → NotFound
+            if ((method == "POST" || method == "GET") && path.StartsWith("/api/job/") && path.EndsWith("/retry"))
+            {
+                // /api/job/{jobId}/retry — acepta GET (dashboard/browser) y POST
+                string segment = path.Substring("/api/job/".Length);
+                string jobId = segment.Substring(0, segment.Length - "/retry".Length);
+                return _jobController.RetryJob(jobId);
+            }
             if (method == "DELETE" && path.StartsWith("/api/job/"))
             {
                 // DELETE /api/job/{jobId} — Eliminar job y sus logs
@@ -145,13 +154,6 @@ namespace PrinterServices.Api
             {
                 string jobId = path.Substring("/api/job/".Length);
                 return _jobController.GetJob(jobId);
-            }
-            if (method == "POST" && path.StartsWith("/api/job/") && path.EndsWith("/retry"))
-            {
-                // /api/job/{jobId}/retry
-                string segment = path.Substring("/api/job/".Length);
-                string jobId = segment.Substring(0, segment.Length - "/retry".Length);
-                return _jobController.RetryJob(jobId);
             }
 
             // ── Config ──

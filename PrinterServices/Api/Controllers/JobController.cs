@@ -179,6 +179,26 @@ namespace PrinterServices.Api.Controllers
                 return ApiResult.NotFound();
             }
 
+            // Si el job ya fue completado o está en proceso, retornar OK informativo
+            // RAZÓN: El job pudo ser completado automáticamente (ExpirationLoop/StatusMonitor)
+            // pero el callback DONE no llegó al cliente. Retornar currentStatus para que
+            // el cliente actualice su UI y remueva el item de la lista visual.
+            if (job.Estado == PrintJobStatus.Done
+                || job.Estado == PrintJobStatus.Pending
+                || job.Estado == PrintJobStatus.Printing)
+            {
+                string statusLabel = job.Estado == PrintJobStatus.Done ? "ALREADY_DONE" : "IN_PROGRESS";
+                var infoResponse = new
+                {
+                    status = statusLabel,
+                    jobId = job.JobId,
+                    currentStatus = job.Estado.ToString().ToUpper()
+                };
+                Log.InfoFormat("[JOB] Retry solicitado para job {0} pero ya está en estado {1}",
+                    jobId, job.Estado.ToString().ToUpper());
+                return ApiResult.Ok(JsonConvert.SerializeObject(infoResponse));
+            }
+
             // Aceptar retry de jobs FAILED, EXPIRED y WAITING
             // RAZÓN: FAILED = fallo de impresora (sin papel, tapa abierta)
             //         EXPIRED = superó tiempo máximo en WAITING
