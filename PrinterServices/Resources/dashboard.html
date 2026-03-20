@@ -19,8 +19,18 @@
     <div class="container mx-auto p-4">
         <header class="mb-6">
             <h1 class="text-4xl font-bold mb-2">🖨️ PrinterServices Dashboard</h1>
-            <p class="text-gray-400">Monitoreo en tiempo real — actualiza cada 3s</p>
+            <p class="text-gray-400" id="refresh-mode-label">Modo: Actualización manual</p>
             <p class="text-sm text-gray-500">Última actualización: <span id="last-update">-</span></p>
+            <div class="flex items-center gap-4 mt-3">
+                <label class="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" id="manual-toggle" class="sr-only peer" checked>
+                    <div class="w-11 h-6 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                    <span class="ml-3 text-sm font-medium text-gray-300">Actualizar manualmente</span>
+                </label>
+                <button id="btn-refresh" onclick="manualRefreshAll()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm font-semibold transition-colors">
+                    🔄 Actualizar ahora
+                </button>
+            </div>
         </header>
 
         <!-- Estado de Red -->
@@ -152,6 +162,62 @@
         let currentNotifPage = 1;
         let currentConnPage = 1;
         let currentNetHistPage = 1;
+        let autoRefreshInterval = null;
+        let isManualMode = true;
+
+        // Toggle entre modo manual y auto-refresh
+        function setupRefreshToggle() {
+            const toggle = document.getElementById('manual-toggle');
+            const btnRefresh = document.getElementById('btn-refresh');
+            const label = document.getElementById('refresh-mode-label');
+
+            toggle.addEventListener('change', function() {
+                isManualMode = this.checked;
+                if (isManualMode) {
+                    // Modo manual: detener auto-refresh, mostrar botón
+                    if (autoRefreshInterval) {
+                        clearInterval(autoRefreshInterval);
+                        autoRefreshInterval = null;
+                    }
+                    btnRefresh.classList.remove('hidden');
+                    label.textContent = 'Modo: Actualización manual';
+                } else {
+                    // Modo automático: iniciar auto-refresh cada 3s, ocultar botón
+                    btnRefresh.classList.add('hidden');
+                    label.textContent = 'Modo: Actualización automática (cada 3s)';
+                    manualRefreshAll();
+                    autoRefreshInterval = setInterval(function() {
+                        fetchDashboardData();
+                        loadHistory(currentPage);
+                        loadNotifications(currentNotifPage);
+                        loadConnectivity(currentConnPage);
+                        loadNetworkHistory(currentNetHistPage);
+                    }, 3000);
+                }
+            });
+        }
+
+        // Genera HTML de paginador con selector de página directo
+        function buildPageSelector(currentPage, totalPages, total, callbackFn, colorClass) {
+            if (totalPages <= 1) return `<span class="px-4 py-2 text-gray-400">${total} registros (1 página)</span>`;
+            let options = '';
+            for (let i = 1; i <= totalPages; i++) {
+                options += `<option value="${i}" ${i === currentPage ? 'selected' : ''}>Página ${i}</option>`;
+            }
+            return `<button onclick="${callbackFn}(${currentPage - 1})" class="px-3 py-2 ${colorClass} rounded disabled:opacity-40 disabled:cursor-not-allowed" ${currentPage <= 1 ? 'disabled' : ''}>&laquo;</button>` +
+                `<select onchange="${callbackFn}(parseInt(this.value))" class="bg-gray-700 text-white px-3 py-2 rounded text-sm mx-2">${options}</select>` +
+                `<span class="px-2 py-2 text-gray-400 text-sm">de ${totalPages} (${total} reg.)</span>` +
+                `<button onclick="${callbackFn}(${currentPage + 1})" class="px-3 py-2 ${colorClass} rounded disabled:opacity-40 disabled:cursor-not-allowed" ${currentPage >= totalPages ? 'disabled' : ''}>&raquo;</button>`;
+        }
+
+        // Recarga manual completa de todos los paneles
+        function manualRefreshAll() {
+            fetchDashboardData();
+            loadHistory(currentPage);
+            loadNotifications(currentNotifPage);
+            loadConnectivity(currentConnPage);
+            loadNetworkHistory(currentNetHistPage);
+        }
 
         // Formatear fecha ISO a formato legible: "23/02/2026 14:01:49"
         function formatDate(isoStr) {
@@ -171,7 +237,7 @@
 
         // Eliminar un job por su ID
         async function deleteJob(jobId) {
-            if (!confirm('¿Eliminar job ' + jobId.substring(0, 8) + '...?')) return;
+            if (!confirm('¿Eliminar job ' + jobId + '?')) return;
             try {
                 const resp = await fetch(window.location.origin + '/api/job/' + jobId, { method: 'DELETE' });
                 if (!resp.ok) {
@@ -296,7 +362,7 @@
                                     <td class="p-2 font-mono text-xs">
                                         <a href="#" onclick="showJobDetail('${j.jobId}'); return false;" 
                                            class="text-blue-400 hover:text-blue-300 underline">
-                                            ${j.jobId.substring(0, 8)}
+                                            ${j.jobId}
                                         </a>
                                     </td>
                                     <td class="p-2 font-semibold">${j.impresoraNombre}</td>
@@ -441,7 +507,7 @@
         // Cargar historial paginado
         async function loadHistory(page = 1) {
             try {
-                const response = await fetch(window.location.origin + `/api/dashboard/history?page=${page}&limit=10`);
+                const response = await fetch(window.location.origin + `/api/dashboard/history?page=${page}&limit=50`);
                 if (!response.ok) {
                     const errData = await response.json().catch(() => ({}));
                     throw new Error(errData.error || 'HTTP ' + response.status);
@@ -469,7 +535,7 @@
                                         <td class="p-2 font-mono text-xs">
                                             <a href="#" onclick="showJobDetail('${h.jobId}'); return false;" 
                                                class="text-blue-400 hover:text-blue-300 underline">
-                                                ${h.jobId.substring(0, 8)}
+                                                ${h.jobId}
                                             </a>
                                         </td>
                                         <td class="p-2">${h.impresoraNombre}</td>
@@ -492,16 +558,8 @@
                     document.getElementById('history-table').innerHTML = '<p class="text-gray-400">Sin historial</p>';
                 }
                 
-                // Paginación
-                let pagination = '';
-                if (page > 1) {
-                    pagination += `<button onclick="loadHistory(${page - 1})" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded">← Anterior</button>`;
-                }
-                pagination += `<span class="px-4 py-2">Página ${page} de ${data.totalPages}</span>`;
-                if (page < data.totalPages) {
-                    pagination += `<button onclick="loadHistory(${page + 1})" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded">Siguiente →</button>`;
-                }
-                document.getElementById('pagination').innerHTML = pagination;
+                // Paginación con selector directo
+                document.getElementById('pagination').innerHTML = buildPageSelector(page, data.totalPages, data.total, 'loadHistory', 'bg-blue-600 hover:bg-blue-700');
             } catch (error) {
                 console.error('Error loading history:', error);
                 document.getElementById('history-table').innerHTML = '<p class="text-red-400">Error cargando historial: ' + error.message + '</p>';
@@ -648,7 +706,7 @@
                                         <td class="p-2 font-mono text-xs">
                                             <a href="#" onclick="showJobDetail('${n.jobId}'); return false;" 
                                                class="text-blue-400 hover:text-blue-300 underline">
-                                                ${n.jobId ? n.jobId.substring(0, 8) : '-'}
+                                                ${n.jobId ? n.jobId : '-'}
                                             </a>
                                         </td>
                                         <td class="p-2 text-xs font-semibold text-yellow-300">${n.comandaId || '-'}</td>
@@ -676,16 +734,8 @@
                     document.getElementById('notif-table').innerHTML = '<p class="text-gray-400">Sin notificaciones registradas</p>';
                 }
 
-                // Paginación de notificaciones
-                let pag = '';
-                if (page > 1) {
-                    pag += `<button onclick="loadNotifications(${page - 1})" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 rounded">← Anterior</button>`;
-                }
-                pag += `<span class="px-4 py-2 text-gray-300">Página ${page} de ${data.totalPages} (${data.total} registros)</span>`;
-                if (page < data.totalPages) {
-                    pag += `<button onclick="loadNotifications(${page + 1})" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 rounded">Siguiente →</button>`;
-                }
-                document.getElementById('notif-pagination').innerHTML = pag;
+                // Paginación con selector directo
+                document.getElementById('notif-pagination').innerHTML = buildPageSelector(page, data.totalPages, data.total, 'loadNotifications', 'bg-indigo-600 hover:bg-indigo-700');
             } catch (error) {
                 console.error('Error loading notifications:', error);
                 document.getElementById('notif-table').innerHTML = '<p class="text-red-400">Error cargando notificaciones: ' + error.message + '</p>';
@@ -763,16 +813,8 @@
                     document.getElementById('connectivity-table').innerHTML = '<p class="text-gray-400">Sin registros de conectividad aún. Los eventos se registrarán cuando las impresoras cambien de estado.</p>';
                 }
 
-                // Paginación
-                let pag = '';
-                if (page > 1) {
-                    pag += `<button onclick="loadConnectivity(${page - 1})" class="px-4 py-2 bg-teal-600 hover:bg-teal-700 rounded">← Anterior</button>`;
-                }
-                pag += `<span class="px-4 py-2 text-gray-300">Página ${page} de ${data.totalPages || 1} (${data.total} registros)</span>`;
-                if (page < data.totalPages) {
-                    pag += `<button onclick="loadConnectivity(${page + 1})" class="px-4 py-2 bg-teal-600 hover:bg-teal-700 rounded">Siguiente →</button>`;
-                }
-                document.getElementById('connectivity-pagination').innerHTML = pag;
+                // Paginación con selector directo
+                document.getElementById('connectivity-pagination').innerHTML = buildPageSelector(page, data.totalPages || 1, data.total, 'loadConnectivity', 'bg-teal-600 hover:bg-teal-700');
             } catch (error) {
                 console.error('Error loading connectivity:', error);
                 document.getElementById('connectivity-table').innerHTML = '<p class="text-red-400">Error cargando reporte: ' + error.message + '</p>';
@@ -831,16 +873,8 @@
                     document.getElementById('network-history-table').innerHTML = '<p class="text-gray-400">Sin alertas de red registradas</p>';
                 }
 
-                // Paginación
-                let pag = '';
-                if (page > 1) {
-                    pag += `<button onclick="loadNetworkHistory(${page - 1})" class="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded">← Anterior</button>`;
-                }
-                pag += `<span class="px-4 py-2 text-gray-300">Página ${page} de ${data.totalPages || 1} (${data.total} alertas)</span>`;
-                if (page < data.totalPages) {
-                    pag += `<button onclick="loadNetworkHistory(${page + 1})" class="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded">Siguiente →</button>`;
-                }
-                document.getElementById('network-history-pagination').innerHTML = pag;
+                // Paginación con selector directo
+                document.getElementById('network-history-pagination').innerHTML = buildPageSelector(page, data.totalPages || 1, data.total, 'loadNetworkHistory', 'bg-purple-600 hover:bg-purple-700');
 
                 // Cambios de IP
                 if (data.ipChanges && data.ipChanges.length > 0) {
@@ -881,12 +915,13 @@
 
         // Iniciar
         initChart();
+        setupRefreshToggle();
         fetchDashboardData();
         loadHistory(1);
         loadNotifications(1);
         loadConnectivity(1);
         loadNetworkHistory(1);
-        setInterval(fetchDashboardData, 3000); // Actualizar cada 3s
+        // No auto-refresh por defecto (modo manual activo)
     </script>
 </body>
 </html>
