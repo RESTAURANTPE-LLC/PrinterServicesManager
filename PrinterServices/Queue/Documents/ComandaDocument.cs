@@ -93,14 +93,32 @@ namespace PrinterServices.Queue.Documents
         /// </summary>
         private string DetectarContexto()
         {
-            // Anulación: TipoImpresion contiene "ANULA" o es "3"
+            // ── ANULACIÓN ──
+            // Señales: TipoComanda = "2" (COMANDA_TIPO_DELETE)
+            //          TipoImpresion = "0" (TIPO_ANULADO)
+            //          TipoImpresion contiene "ANULA" o es "3"
+            //          TipoImpresion resuelta contiene "ANULACION"
+            if (!string.IsNullOrEmpty(TipoComanda) && TipoComanda == "2")
+                return "Anulacion";
+            if (!string.IsNullOrEmpty(TipoImpresion))
+            {
+                string upper = TipoImpresion.ToUpperInvariant();
+                if (upper == "0" || upper == "3" || upper.Contains("ANULA"))
+                    return "Anulacion";
+            }
             string tipoResuelto = ResolveTipoImpresion(TipoImpresion);
             if (tipoResuelto != null && tipoResuelto.Contains("ANULACION"))
                 return "Anulacion";
 
-            // Delivery: Modalidad es DELIVERY
+            // ── DELIVERY ──
+            // Señales: Modalidad contiene "DELIVERY" (puede ser "DELIVERY" directo)
+            //          DeliveryId tiene valor (señal indirecta de que es delivery)
+            //          Modalidad = "-1" NO es delivery (es PARAM_TODOS, valor por defecto)
             if (!string.IsNullOrEmpty(Modalidad)
-                && Modalidad.Equals("DELIVERY", StringComparison.OrdinalIgnoreCase))
+                && Modalidad.ToUpperInvariant().Contains("DELIVERY"))
+                return "Delivery";
+            // Si DeliveryId tiene valor y hay campos de delivery poblados, es delivery
+            if (!string.IsNullOrEmpty(DeliveryId) && !string.IsNullOrEmpty(ModalidadEntrega))
                 return "Delivery";
 
             return "Salon";
@@ -155,13 +173,22 @@ namespace PrinterServices.Queue.Documents
 
             foreach (var field in template.Fields)
             {
-                if (!field.Visible) continue;
+                // Visibilidad efectiva del contexto (override puede ocultar un campo visible base)
+                if (!field.GetEffectiveVisible(contexto)) continue;
 
-                // FILTRO DE CONTEXTO por FieldName — no depende del template
+                // FILTRO DE CONTEXTO por FieldName — reglas hardcodeadas
                 if (!CampoAplicaAlContexto(field.FieldName, contexto))
                     continue;
 
-                // Campos especiales
+                // ── Resolver estilos efectivos para este contexto ──
+                string effLabel = field.GetEffectiveLabel(contexto);
+                string effFont = field.GetEffectiveFontFamily(contexto) ?? "Arial";
+                float effSize = (float)field.GetEffectiveFontSize(contexto);
+                bool effBold = field.GetEffectiveFontBold(contexto);
+                bool effItalic = field.GetEffectiveFontItalic(contexto);
+                string effAlign = field.GetEffectiveAlignment(contexto);
+
+                // ── Campos especiales ──
                 if (field.FieldName == "ProductosHtml")
                 {
                     lines.AddRange(ParseProductosHtml());
@@ -169,14 +196,24 @@ namespace PrinterServices.Queue.Documents
                 }
                 if (field.FieldName == "Separator")
                 {
-                    string sep = !string.IsNullOrEmpty(field.Label) ? field.Label : "─────────────────────";
-                    lines.Add(new RenderLine(sep, field.FontFamily ?? "Arial",
-                        (float)field.FontSize, field.FontBold, field.FontItalic, field.Alignment));
+                    string sep = !string.IsNullOrEmpty(effLabel) ? effLabel : "─────────────────────";
+                    lines.Add(new RenderLine(sep, effFont, effSize, effBold, effItalic, effAlign));
                     continue;
                 }
                 if (field.FieldName == "EmptyLine")
                 {
-                    lines.Add(RenderLine.Empty((float)field.FontSize));
+                    lines.Add(RenderLine.Empty(effSize));
+                    continue;
+                }
+                // InicioPedido / FinPedido: texto personalizable (usa Label efectivo)
+                if (field.FieldName == "InicioPedido" || field.FieldName == "FinPedido")
+                {
+                    string texto = !string.IsNullOrEmpty(effLabel)
+                        ? effLabel
+                        : (field.FieldName == "InicioPedido"
+                            ? "---------- INICIO PEDIDO ----------"
+                            : "---------- FIN PEDIDO ----------");
+                    lines.Add(new RenderLine(texto, effFont, effSize, effBold, effItalic, effAlign ?? "Center"));
                     continue;
                 }
                 if (field.FieldName == "MarcoAnulacion")
@@ -187,19 +224,14 @@ namespace PrinterServices.Queue.Documents
                     continue;
                 }
 
-                // Obtener valor del campo
+                // ── Campos normales: obtener valor y armar texto ──
                 string value = GetFieldValue(field.FieldName);
                 if (string.IsNullOrEmpty(value)) continue;
 
-                // Armar texto: Label + valor
-                string text = string.IsNullOrEmpty(field.Label) ? value : field.Label + " " + value;
+                // Armar texto: Label efectivo + valor
+                string text = string.IsNullOrEmpty(effLabel) ? value : effLabel + " " + value;
 
-                lines.Add(new RenderLine(text,
-                    field.FontFamily ?? "Arial",
-                    (float)field.FontSize,
-                    field.FontBold,
-                    field.FontItalic,
-                    field.Alignment));
+                lines.Add(new RenderLine(text, effFont, effSize, effBold, effItalic, effAlign));
             }
 
             return lines;
@@ -335,7 +367,14 @@ namespace PrinterServices.Queue.Documents
                 case "Mozo": return Mozo;
                 case "MozoPedido": return MozoPedido;
                 case "Salon": return Salon;
-                case "Cliente": return Cliente;
+                case "Cliente":
+                    // Replica lógica original de _getImpresionComandaMejorada:
+                    // - En delivery (modalidad == DELIVERY): muestra si cliente != ""
+                    // - En no-delivery: muestra solo si modalidad != null Y cliente != ""
+                    // - Si modalidad es null (salon normal): NO muestra cliente
+                    if (string.IsNullOrEmpty(Cliente)) return null;
+                    if (string.IsNullOrEmpty(Modalidad)) return null;
+                    return Cliente;
                 case "Empresa": return Empresa;
                 case "Comprobante": return Comprobante;
                 case "Modalidad":

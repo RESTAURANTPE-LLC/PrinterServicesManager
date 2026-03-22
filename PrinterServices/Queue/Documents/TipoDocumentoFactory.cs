@@ -126,6 +126,14 @@ namespace PrinterServices.Queue.Documents
                     }
                 }
 
+                // Strip "INICIO PEDIDO" y "FIN PEDIDO" — ahora son campos del template
+                if (Regex.IsMatch(text, @"INICIO\s+PEDIDO", RegexOptions.IgnoreCase)) continue;
+                if (Regex.IsMatch(text, @"FIN\s+PEDIDO", RegexOptions.IgnoreCase)) continue;
+
+                // Strip líneas que son SOLO guiones/rayas (separadores puros antes del primer producto)
+                // Estos ya se manejan como campos Separator/InicioPedido/FinPedido en el template
+                if (sb.Length == 0 && Regex.IsMatch(text, @"^[-─━═]{3,}$")) continue;
+
                 sb.Append(seg).Append("<br>");
             }
 
