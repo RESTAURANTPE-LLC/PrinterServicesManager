@@ -634,12 +634,21 @@ namespace PrinterServices.Api.Controllers
                 .Select(g => g.OrderByDescending(l => l.Fecha).First())
                 .ToList();
 
+            var totalJobs = uniqueJobs.Count;
+            var exitosas = uniqueJobs.Count(l => l.Estado == "DONE");
+            var fallidas = uniqueJobs.Count(l => l.Estado == "FAILED");
+            var esperando = uniqueJobs.Count(l => l.Estado == "WAITING");
+            var enProceso = uniqueJobs.Count(l => l.Estado == "PRINTING" || l.Estado == "PENDING");
+            var otros = totalJobs - exitosas - fallidas - esperando - enProceso;
+
             var printStats = new
             {
-                total24h = uniqueJobs.Count, // Jobs únicos, no registros de log
-                exitosas24h = uniqueJobs.Count(l => l.Estado == "DONE"),
-                fallidas24h = uniqueJobs.Count(l => l.Estado == "FAILED"),
-                esperando24h = uniqueJobs.Count(l => l.Estado == "WAITING")
+                total24h = totalJobs,
+                exitosas24h = exitosas,
+                fallidas24h = fallidas,
+                esperando24h = esperando,
+                enProceso24h = enProceso,
+                otros24h = otros
             };
 
             // RAZÓN: Obtener últimas 10 latencias para gráfica

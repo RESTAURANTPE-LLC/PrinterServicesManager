@@ -205,17 +205,37 @@ namespace PrinterServices.Workers
 
         private async Task ProcessJobAsync(PrintJob job, CancellationToken ct)
         {
+            // ═══════════════════════════════════════════════════════════════════
+            // Consultar impresora en BD UNA SOLA VEZ (tipo conexión + IP actualizada)
+            // ═══════════════════════════════════════════════════════════════════
+            Data.Models.PrinterEntity printerEntity = null;
+            try
+            {
+                printerEntity = _db.Table<Data.Models.PrinterEntity>()
+                    .FirstOrDefault(p => p.ImpresoraId == job.ImpresoraId);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("[WORKER] Error consultando impresora en BD: " + ex.Message);
+            }
+
+            // Si es USB, derivar a flujo USB específico
+            if (printerEntity != null && printerEntity.TipoConexion == "USB"
+                && !string.IsNullOrEmpty(printerEntity.UsbUniqueKey))
+            {
+                await ProcessUsbJobAsync(job, printerEntity.UsbUniqueKey, ct);
+                return;
+            }
+
+            // ═══════════════════════════════════════════════════════════════════
+            // FLUJO RED (comportamiento existente)
+            // ═══════════════════════════════════════════════════════════════════
+
             // FASE 8: Verificar salud de red — INFORMATIVO, no bloqueante
-            // RAZÓN: El estado "changed" NO debe bloquear por sí solo porque:
-            //   1. En instalación nueva (sin impresiones previas), no hay referencia de "red buena"
-            //   2. El usuario puede cambiar de red intencionalmente (a la correcta)
-            //   3. La verificación real de conectividad se hace con PrinterStatusChecker más abajo
-            // CRITERIO: Primero intentar imprimir. Si falla, el diagnóstico incluye info de red.
             string networkStatus = _networkHealthChecker.GetCurrentNetworkStatus();
             bool networkChanged = (networkStatus == "changed");
             if (networkChanged)
             {
-                // Solo advertir — la verificación de conectividad de impresora determinará si es alcanzable
                 Log.Warn($"[WORKER] Job {job.JobId} — Red cambió respecto a última impresión exitosa. Se intentará imprimir de todas formas.");
             }
 
@@ -223,44 +243,27 @@ namespace PrinterServices.Workers
             int connectTimeoutMs = cfg.GetInt("TcpConnectTimeoutMs", 3000);
 
             // ═══════════════════════════════════════════════════════════════════
-            // RESOLUCIÓN MAC → IP: Obtener IP más actual desde tabla printers
+            // RESOLUCIÓN MAC → IP: Usar IP de BD (ya consultada arriba)
             // ═══════════════════════════════════════════════════════════════════
-            // RAZÓN: QuipuNet envía IP y MAC, pero la IP puede estar desactualizada.
-            //   - El ArpScanWorker/PrinterIpResolver mantiene printers.ip actualizada por MAC.
-            //   - mac_address es el identificador físico REAL (inmutable).
-            //   - ip es solo ubicación temporal en la red (puede cambiar por DHCP).
-            // CRITERIO: Consultar BD por ImpresoraId → si tiene IP más reciente, usarla.
-            string effectiveIp = job.ImpresoraIp; // IP original del job (viene de QuipuNet)
+            string effectiveIp = job.ImpresoraIp;
             int port = job.Puerto > 0 ? job.Puerto : cfg.GetInt("DefaultPrinterPort", 9100);
 
-            try
+            if (printerEntity != null)
             {
-                // Buscar impresora en BD para obtener IP más actual (pudo ser resuelta por ARP)
-                var printerFromDb = _db.Table<Data.Models.PrinterEntity>()
-                    .FirstOrDefault(p => p.ImpresoraId == job.ImpresoraId);
-
-                if (printerFromDb != null)
+                // Usar IP de la BD (actualizada por ArpScanWorker) en vez de la del job
+                if (!string.IsNullOrEmpty(printerEntity.Ip) && printerEntity.Ip != effectiveIp)
                 {
-                    // Usar IP de la BD (actualizada por ArpScanWorker) en vez de la del job
-                    if (!string.IsNullOrEmpty(printerFromDb.Ip) && printerFromDb.Ip != effectiveIp)
-                    {
-                        Log.InfoFormat("[WORKER] Job {0} — IP resuelta por BD: {1} → {2} (MAC: {3}, arpResolved={4})",
-                            job.JobId, effectiveIp, printerFromDb.Ip, printerFromDb.MacAddress ?? "sin-mac",
-                            printerFromDb.IpResueltaPorArp);
-                        effectiveIp = printerFromDb.Ip; // Usar IP actualizada
-                    }
-
-                    // Actualizar puerto si la BD tiene uno diferente (más confiable)
-                    if (printerFromDb.Puerto > 0)
-                    {
-                        port = printerFromDb.Puerto;
-                    }
+                    Log.InfoFormat("[WORKER] Job {0} — IP resuelta por BD: {1} → {2} (MAC: {3}, arpResolved={4})",
+                        job.JobId, effectiveIp, printerEntity.Ip, printerEntity.MacAddress ?? "sin-mac",
+                        printerEntity.IpResueltaPorArp);
+                    effectiveIp = printerEntity.Ip;
                 }
-            }
-            catch (Exception ex)
-            {
-                // Si falla la consulta a BD, continuar con la IP original del job
-                Log.Warn("[WORKER] Error consultando IP actualizada de BD, usando IP del job: " + ex.Message);
+
+                // Actualizar puerto si la BD tiene uno diferente (más confiable)
+                if (printerEntity.Puerto > 0)
+                {
+                    port = printerEntity.Puerto;
+                }
             }
 
             // FASE 8: Iniciar medición de latencias (con IP efectiva, no la original)
@@ -407,20 +410,68 @@ namespace PrinterServices.Workers
                 }
             }
 
-            // Si tiene ContenidoHtml, renderizar HTML → Bitmap → ESC/POS raster
-            if (!string.IsNullOrEmpty(job.ContenidoHtml))
+            // ─── Feature flag: FORMATO ANTIGUO SERVICIO ───
+            // Si está activo, renderiza la cadenaHTML como bitmap con fuentes GDI
+            // (Arial Bold, Italic, Lucida Console) replicando el visual del servicio antiguo.
+            // Usa cadenaHTML que tiene tags h2-h4/b/i generados por ImpresionController.
+            // Fallback a cadena plana si cadenaHTML no viene.
+            // Tiene prioridad sobre HTML→Bitmap (HtmlBitmapRenderer) y texto plano ESC/POS.
+            if (job.FormatoAntiguoServicio && job.Documento != null)
             {
-                Log.DebugFormat("[WORKER] Job {0} — modo HTML→BITMAP", job.JobId);
+                // ITipoDocumento genera el HTML con estructura CreaTicket
+                // (cabecera desde campos individuales + productos del HTML original)
+                string htmlDocumento = job.Documento.GenerarHtml();
+                if (!string.IsNullOrEmpty(htmlDocumento))
+                {
+                    Log.DebugFormat("[WORKER] Job {0} — modo FORMATO_ANTIGUO_SERVICIO ({1}→GDI bitmap)",
+                        job.JobId, job.Documento.GetType().Name);
+                    var builder = new EscPosCommandBuilder(driver);
+                    builder.Init();
+
+                    using (Bitmap bmp = Rendering.ComandaBitmapRenderer.RenderAsBitmap(
+                        htmlDocumento, job.TamanioLetra))
+                    using (Bitmap resized = BitmapResizer.ResizeIfNeeded(bmp, 576))
+                    {
+                        builder.AddBitmapFromImage(resized);
+                    }
+
+                    if (job.AbreGaveta)
+                    {
+                        builder.OpenCashDrawer();
+                    }
+
+                    builder.Cut(CutType.Partial);
+                    return builder.Build();
+                }
+            }
+
+            // Si tiene ContenidoHtml O FormatoComandaMejorada (POS 57) activo,
+            // renderizar HTML → Bitmap → ESC/POS raster.
+            // RAZÓN: POS 57 activa = QuipuNet generó CadenaHTML con tags HTML (<h2>, <b>, etc.)
+            // y el Front la imprimiría como bitmap via HtmlBitmapRenderer. PS replica ese comportamiento.
+            // Mismo fallback que PrintUtil.ProcesarModoEthernet: CadenaHTML ?? Cadena.
+            string htmlParaRenderizar = null;
+            if (job.FormatoComandaMejorada)
+            {
+                htmlParaRenderizar = !string.IsNullOrEmpty(job.ContenidoHtml) ? job.ContenidoHtml : job.Contenido;
+            }
+            else if (!string.IsNullOrEmpty(job.ContenidoHtml))
+            {
+                htmlParaRenderizar = job.ContenidoHtml;
+            }
+
+            if (!string.IsNullOrEmpty(htmlParaRenderizar))
+            {
+                Log.DebugFormat("[WORKER] Job {0} — modo HTML→BITMAP (POS57={1})", job.JobId, job.FormatoComandaMejorada);
                 var builder = new EscPosCommandBuilder(driver);
                 builder.Init();
 
-                using (Bitmap bmp = HtmlBitmapRenderer.RenderSimpleHtmlAsBitmap(job.ContenidoHtml))
+                using (Bitmap bmp = HtmlBitmapRenderer.RenderSimpleHtmlAsBitmap(htmlParaRenderizar))
                 using (Bitmap resized = BitmapResizer.ResizeIfNeeded(bmp, 576))
                 {
                     builder.AddBitmapFromImage(resized);
                 }
 
-                // Abrir gaveta si se solicitó
                 if (job.AbreGaveta)
                 {
                     builder.OpenCashDrawer();
@@ -504,6 +555,193 @@ namespace PrinterServices.Workers
             textBuilder.Cut(CutType.Partial);
 
             return textBuilder.Build();
+        }
+
+        /// <summary>
+        /// Flujo de impresión para impresoras USB.
+        /// Análogo a ProcessJobAsync pero usando UsbTransport en vez de TcpTransport.
+        /// La identidad USB (VID+PID+Serial) es inmutable — si el usuario cambió de puerto,
+        /// UsbTransport resuelve el DevicePath actual automáticamente.
+        /// </summary>
+        private async Task ProcessUsbJobAsync(PrintJob job, string usbUniqueKey, CancellationToken ct)
+        {
+            var cfg = ConfigManager.Instance;
+            int checkTimeoutMs = cfg.GetInt("TcpConnectTimeoutMs", 3000);
+
+            // FASE 8: Timing para USB
+            var timingBuilder = new LatencyTiming.Builder(
+                jobId: job.JobId,
+                impresoraId: job.ImpresoraId,
+                impresoraIp: "USB:" + usbUniqueKey,
+                enqueuedAt: job.FechaCreacion);
+            DateTime startedAt = DateTime.Now;
+            timingBuilder.Started(startedAt);
+
+            // Pre-check: verificar si la impresora USB está conectada y lista
+            var printerStatus = await Monitoring.UsbPrinterStatusChecker.CheckAsync(
+                usbUniqueKey, checkTimeoutMs, ct);
+
+            if (!printerStatus.Online)
+            {
+                string offlineReason = "Impresora USB desconectada";
+                Log.WarnFormat("[WORKER] Job {0} — impresora USB {1} ({2}) OFFLINE, moviendo a WAITING",
+                    job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, usbUniqueKey);
+
+                _jobManager.MarkWaiting(job, offlineReason);
+                LogPrint(job, "WAITING", offlineReason);
+                NotifyIfAvailable(n => n.NotifyPrintWaiting(
+                    job.JobId, job.ComandaId, job.ImpresoraId,
+                    job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen, offlineReason));
+                _callbackNotifier.NotifyStatusChangeFireAndForget(job, "WAITING", offlineReason);
+                return;
+            }
+
+            if (!printerStatus.TienePapel)
+            {
+                Log.WarnFormat("[WORKER] Job {0} — impresora USB {1} SIN PAPEL, marcando FAILED",
+                    job.JobId, job.ImpresoraNombre ?? job.ImpresoraId);
+                _jobManager.MarkFailed(job, "Sin papel");
+                LogPrint(job, "FAILED", "Sin papel");
+                NotifyIfAvailable(n => n.NotifyPrintFailed(
+                    job.JobId, job.ComandaId, job.ImpresoraId,
+                    job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen,
+                    "Sin papel", job.Reintentos));
+                _callbackNotifier.NotifyStatusChangeFireAndForget(job, "FAILED", "Sin papel");
+                return;
+            }
+
+            if (printerStatus.TapaAbierta)
+            {
+                Log.WarnFormat("[WORKER] Job {0} — impresora USB {1} TAPA ABIERTA, marcando FAILED",
+                    job.JobId, job.ImpresoraNombre ?? job.ImpresoraId);
+                _jobManager.MarkFailed(job, "Tapa abierta");
+                LogPrint(job, "FAILED", "Tapa abierta");
+                NotifyIfAvailable(n => n.NotifyPrintFailed(
+                    job.JobId, job.ComandaId, job.ImpresoraId,
+                    job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen,
+                    "Tapa abierta", job.Reintentos));
+                _callbackNotifier.NotifyStatusChangeFireAndForget(job, "FAILED", "Tapa abierta");
+                return;
+            }
+
+            // Construir payload ESC/POS (idéntico para USB y RED)
+            IPrinterDriver driver = DriverFactory.GetDriver(job.PrinterModel);
+            Log.DebugFormat("[WORKER] Driver USB seleccionado: {0} para modelo {1}",
+                driver.ModelName, job.PrinterModel ?? "null");
+
+            byte[] payload = BuildPayload(driver, job);
+
+            // Enviar por cada copia
+            for (int copia = 0; copia < job.Copias; copia++)
+            {
+                if (job.Copias > 1)
+                {
+                    Log.DebugFormat("[WORKER] Job USB {0} — copia {1}/{2}", job.JobId, copia + 1, job.Copias);
+                }
+
+                bool sent = await SendUsbWithRetry(job, payload, usbUniqueKey, ct,
+                    copia == 0 ? timingBuilder : null);
+                if (!sent)
+                {
+                    if (copia == 0)
+                    {
+                        var failedTiming = timingBuilder.Completed(DateTime.Now, false,
+                            "Envío USB falló después de reintentos").Build();
+                        _latencyMeasurement.RecordPrintLatency(failedTiming);
+                    }
+                    return;
+                }
+            }
+
+            // Completar timing exitoso
+            DateTime completedAt = DateTime.Now;
+            var successTiming = timingBuilder.Completed(completedAt, true).Build();
+            _latencyMeasurement.RecordPrintLatency(successTiming);
+            _latencyMeasurement.UpdatePrinterStats(job.ImpresoraId);
+
+            // Detectar degradación
+            string degradationStatus = _degradationDetector.DetectDegradation(job.ImpresoraId, successTiming);
+            if (degradationStatus == "critical" || degradationStatus == "degraded")
+            {
+                Log.Warn($"[WORKER] Degradación detectada en USB {job.ImpresoraId}: {degradationStatus}");
+            }
+
+            // Éxito
+            _jobManager.MarkDone(job);
+            string pedidoInfo = job.PedidoIds != null && job.PedidoIds.Count > 0
+                ? " [pedidos: " + string.Join(",", job.PedidoIds) + "]"
+                : "";
+            LogPrint(job, "DONE", "Impresión USB completada" + pedidoInfo);
+            NotifyIfAvailable(n => n.NotifyPrintSuccess(
+                job.JobId, job.ComandaId, job.ImpresoraId,
+                job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen));
+            _callbackNotifier.NotifyStatusChangeFireAndForget(job, "DONE");
+        }
+
+        /// <summary>
+        /// Envía payload a impresora USB con reintentos exponenciales.
+        /// Análogo a SendWithRetryInstrumented pero usando UsbTransport.
+        /// </summary>
+        private async Task<bool> SendUsbWithRetry(PrintJob job, byte[] payload,
+            string usbUniqueKey, CancellationToken ct, LatencyTiming.Builder timingBuilder)
+        {
+            var cfg = ConfigManager.Instance;
+            int maxRetries = cfg.GetInt("MaxRetries", 3);
+            int retryBackoffBaseMs = cfg.GetInt("RetryBackoffBaseMs", 500);
+
+            for (int attempt = 0; attempt <= maxRetries; attempt++)
+            {
+                if (attempt > 0)
+                {
+                    int backoff = retryBackoffBaseMs * (1 << (attempt - 1));
+                    Log.InfoFormat("[WORKER] Job USB {0} — retry {1}/{2}, esperando {3}ms",
+                        job.JobId, attempt, maxRetries, backoff);
+                    await Task.Delay(backoff, ct);
+                }
+
+                using (var transport = new UsbTransport(usbUniqueKey))
+                {
+                    try
+                    {
+                        DateTime beforeConnect = DateTime.Now;
+                        await transport.ConnectAsync(ct);
+                        if (timingBuilder != null)
+                        {
+                            timingBuilder.TcpConnected(DateTime.Now);
+                        }
+
+                        DateTime beforeSend = DateTime.Now;
+                        await transport.SendAsync(payload, ct);
+                        if (timingBuilder != null)
+                        {
+                            timingBuilder.DataSent(DateTime.Now, payload.Length);
+                        }
+
+                        transport.Disconnect();
+
+                        Log.DebugFormat("[WORKER] Job USB {0} — datos enviados ({1} bytes) via {2}",
+                            job.JobId, payload.Length, usbUniqueKey);
+                        return true;
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.WarnFormat("[WORKER] Job USB {0} — fallo intento {1}/{2}: {3}",
+                            job.JobId, attempt + 1, maxRetries + 1, ex.Message);
+
+                        if (attempt == maxRetries)
+                        {
+                            HandleFailure(job, "USB: " + ex.Message);
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            return false;
         }
 
         /// <summary>

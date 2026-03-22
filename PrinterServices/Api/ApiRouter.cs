@@ -123,6 +123,11 @@ namespace PrinterServices.Api
                 string body = await ReadBodyAsync(request); // Leer body JSON del request
                 return _printerController.SyncPrinters(body); // Llamar a método de sincronización
             }
+            // ── USB Discovery: Enumerar impresoras USB conectadas ──
+            if (method == "GET" && path == "/api/printer/usb/discover")
+            {
+                return _printerController.DiscoverUsbPrinters();
+            }
 
             // ── Jobs ──
             if (method == "POST" && path == "/api/jobs/status")

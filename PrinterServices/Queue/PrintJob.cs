@@ -46,6 +46,9 @@ namespace PrinterServices.Queue
         public bool FacturacionElectronica { get; set; }  // Flag: cadena contiene ##FE## marker para QR
         public string TamanioQr { get; set; }             // Tamaño QR configurado (ej: "3", "5")
         public string QrEncuesta { get; set; }            // Contenido del QR de encuesta (separado de QrData)
+        public bool FormatoComandaMejorada { get; set; }  // POS 57: forzar HTML→Bitmap en BuildPayload
+        public bool FormatoAntiguoServicio { get; set; } // Feature flag: renderizar comanda con fuentes GDI como el servicio antiguo
+        public Documents.ITipoDocumento Documento { get; set; } // Documento tipado (ComandaDocument, VentaDocument, etc.) — genera HTML estilo CreaTicket
 
         public PrintJobStatus Estado { get; set; }
         public int Reintentos { get; set; }
@@ -102,7 +105,8 @@ namespace PrinterServices.Queue
                 AreaImpresion = this.AreaImpresion,
                 FacturacionElectronica = this.FacturacionElectronica ? 1 : 0,  // Fase 7B: persistir flag FE
                 TamanioQr = this.TamanioQr,                                    // Fase 7B: persistir tamaño QR
-                QrEncuesta = this.QrEncuesta                                   // Fase 7B: persistir QR encuesta
+                QrEncuesta = this.QrEncuesta,                                  // Fase 7B: persistir QR encuesta
+                FormatoAntiguoServicio = this.FormatoAntiguoServicio ? 1 : 0   // Feature flag formato antiguo
             };
         }
 
@@ -164,7 +168,8 @@ namespace PrinterServices.Queue
                 AreaImpresion = entity.AreaImpresion,
                 FacturacionElectronica = entity.FacturacionElectronica == 1,    // Fase 7B: restaurar flag FE
                 TamanioQr = entity.TamanioQr,                                  // Fase 7B: restaurar tamaño QR
-                QrEncuesta = entity.QrEncuesta                                 // Fase 7B: restaurar QR encuesta
+                QrEncuesta = entity.QrEncuesta,                                // Fase 7B: restaurar QR encuesta
+                FormatoAntiguoServicio = entity.FormatoAntiguoServicio == 1     // Feature flag formato antiguo
             };
         }
 

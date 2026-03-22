@@ -108,6 +108,9 @@ namespace PrinterServices.Data.Models
         [Column("qr_encuesta")]
         public string QrEncuesta { get; set; }           // Contenido del QR de encuesta
 
+        [Column("formato_antiguo_servicio")]
+        public int FormatoAntiguoServicio { get; set; }  // 1 = renderizar con fuentes GDI como servicio antiguo
+
         public PrintJobEntity()
         {
             Copias = 1;

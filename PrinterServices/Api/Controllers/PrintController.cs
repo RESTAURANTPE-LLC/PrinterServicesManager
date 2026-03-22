@@ -5,6 +5,7 @@ using log4net;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using PrinterServices.Queue;
+using PrinterServices.Queue.Documents;
 
 namespace PrinterServices.Api.Controllers
 {
@@ -220,6 +221,32 @@ namespace PrinterServices.Api.Controllers
 
             job.TamanioQr = GetString(json, "impresora_tamanioqr");            // Tamaño QR de la impresora
             job.QrEncuesta = GetString(json, "qrEncuesta");                    // QR de encuesta (separado de QrData)
+
+            // POS 57: formato comanda mejorada (HTML→Bitmap)
+            JToken fmToken;
+            if (json.TryGetValue("formato_comanda_mejorada", StringComparison.OrdinalIgnoreCase, out fmToken))
+            {
+                job.FormatoComandaMejorada = fmToken.Type == JTokenType.Boolean
+                    ? fmToken.Value<bool>()
+                    : fmToken.ToString() == "1" || fmToken.ToString().Equals("true", StringComparison.OrdinalIgnoreCase);
+            }
+
+            // Feature flag: formato antiguo servicio (renderiza comanda como bitmap con fuentes GDI)
+            JToken fasToken;
+            if (json.TryGetValue("formato_antiguo_servicio", StringComparison.OrdinalIgnoreCase, out fasToken))
+            {
+                job.FormatoAntiguoServicio = fasToken.Type == JTokenType.Boolean
+                    ? fasToken.Value<bool>()
+                    : fasToken.ToString() == "1" || fasToken.ToString().Equals("true", StringComparison.OrdinalIgnoreCase);
+            }
+
+            // Si formato antiguo está activo, crear ITipoDocumento desde el JSON
+            // El Factory extrae los campos individuales (Mesa, Mozo, etc.) y genera HTML estilo CreaTicket
+            if (job.FormatoAntiguoServicio)
+            {
+                string tipo = job.TipoImpresion ?? "comanda";
+                job.Documento = TipoDocumentoFactory.Create(json, tipo);
+            }
 
             // Copias para promociones: si viene promocionsorteo_cantidadimpresiones, usar como Copias
             // RAZÓN: imprimirPromociones() imprime N copias del sorteo. Es distinto de areaproduccion_numerocopias (comandas).

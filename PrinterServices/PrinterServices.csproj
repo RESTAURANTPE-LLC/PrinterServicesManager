@@ -102,10 +102,14 @@
     <Compile Include="Drivers\LineaParser.cs" />
     <Compile Include="Transport\ITransport.cs" />
     <Compile Include="Transport\TcpTransport.cs" />
+    <Compile Include="Transport\UsbDeviceIdentity.cs" />
+    <Compile Include="Transport\UsbDeviceEnumerator.cs" />
+    <Compile Include="Transport\UsbTransport.cs" />
     <Compile Include="Workers\PrintWorker.cs" />
     <Compile Include="Workers\ArpScanWorker.cs" />
     <Compile Include="Monitoring\PrinterStatusChecker.cs" />
     <Compile Include="Monitoring\StatusMonitor.cs" />
+    <Compile Include="Monitoring\UsbPrinterStatusChecker.cs" />
     <Compile Include="Config\ConfigManager.cs" />
     <Compile Include="Api\Controllers\ConfigController.cs" />
     <Compile Include="Grpc\Generated\PrinterNotification.cs" />
@@ -133,6 +137,10 @@
     <Compile Include="Data\Models\IpChangeNotificationDto.cs" />
     <Compile Include="Data\Models\SyncResponseDto.cs" />
     <Compile Include="Rendering\HtmlBitmapRenderer.cs" />
+    <Compile Include="Rendering\ComandaBitmapRenderer.cs" />
+    <Compile Include="Queue\Documents\ITipoDocumento.cs" />
+    <Compile Include="Queue\Documents\ComandaDocument.cs" />
+    <Compile Include="Queue\Documents\TipoDocumentoFactory.cs" />
     <Compile Include="Rendering\BitmapResizer.cs" />
     <Compile Include="Core\Network\ArpHelper.cs" />
     <Compile Include="Core\Network\MacAddressNormalizer.cs" />

@@ -7,6 +7,7 @@ using Newtonsoft.Json.Linq;
 using PrinterServices.Core.Network;
 using PrinterServices.Data;
 using PrinterServices.Data.Models;
+using PrinterServices.Transport;
 
 namespace PrinterServices.Api.Controllers
 {
@@ -42,7 +43,11 @@ namespace PrinterServices.Api.Controllers
                         online = p.EstadoOnline == 1,
                         tienePapel = p.TienePapel == 1,
                         tapaAbierta = p.TapaAbierta == 1,
-                        ultimoCheck = p.UltimoCheck
+                        ultimoCheck = p.UltimoCheck,
+                        tipoConexion = p.TipoConexion ?? "RED",
+                        usbUniqueKey = p.UsbUniqueKey,
+                        usbDevicePath = p.UsbDevicePath,
+                        usbFriendlyName = p.UsbFriendlyName
                     })
                 };
 
@@ -79,7 +84,11 @@ namespace PrinterServices.Api.Controllers
                     tienePapel = printer.TienePapel == 1,
                     tapaAbierta = printer.TapaAbierta == 1,
                     ipResueltaPorArp = printer.IpResueltaPorArp == 1,
-                    ultimoCheck = printer.UltimoCheck
+                    ultimoCheck = printer.UltimoCheck,
+                    tipoConexion = printer.TipoConexion ?? "RED",
+                    usbUniqueKey = printer.UsbUniqueKey,
+                    usbDevicePath = printer.UsbDevicePath,
+                    usbFriendlyName = printer.UsbFriendlyName
                 };
 
                 return ApiResult.Ok(JsonConvert.SerializeObject(response));
@@ -108,10 +117,19 @@ namespace PrinterServices.Api.Controllers
                     return ApiResult.BadRequest("impresora_id es requerido");
                 }
 
+                string tipoConexion = GetString(json, "tipo_conexion") ?? "RED";
+                string usbUniqueKey = GetString(json, "usb_unique_key");
+
                 string ip = GetString(json, "ip") ?? GetString(json, "impresora_ip");
-                if (string.IsNullOrEmpty(ip))
+                // IP es requerido solo para impresoras de RED
+                // Impresoras USB usan usb_unique_key como identificador
+                if (string.IsNullOrEmpty(ip) && tipoConexion != "USB")
                 {
-                    return ApiResult.BadRequest("ip es requerido");
+                    return ApiResult.BadRequest("ip es requerido para impresoras de red");
+                }
+                if (tipoConexion == "USB" && string.IsNullOrEmpty(usbUniqueKey))
+                {
+                    return ApiResult.BadRequest("usb_unique_key es requerido para impresoras USB");
                 }
 
                 // Verificar si ya existe
@@ -121,11 +139,20 @@ namespace PrinterServices.Api.Controllers
                 if (existing != null)
                 {
                     // Actualizar
-                    existing.Ip = ip;
+                    existing.Ip = ip ?? existing.Ip;
                     existing.Nombre = GetString(json, "nombre") ?? existing.Nombre;
                     existing.Modelo = GetString(json, "modelo") ?? GetString(json, "printermodel") ?? existing.Modelo;
                     existing.ModoImpresion = GetString(json, "modo_impresion") ?? existing.ModoImpresion;
                     existing.MacAddress = GetString(json, "mac_address") ?? existing.MacAddress;
+
+                    // Campos USB
+                    existing.TipoConexion = tipoConexion;
+                    if (!string.IsNullOrEmpty(usbUniqueKey))
+                    {
+                        existing.UsbUniqueKey = usbUniqueKey;
+                        existing.UsbDevicePath = GetString(json, "usb_device_path") ?? existing.UsbDevicePath;
+                        existing.UsbFriendlyName = GetString(json, "usb_friendly_name") ?? existing.UsbFriendlyName;
+                    }
 
                     int puerto;
                     string puertoStr = GetString(json, "puerto");
@@ -171,11 +198,15 @@ namespace PrinterServices.Api.Controllers
                     {
                         ImpresoraId = impresoraId,
                         Nombre = GetString(json, "nombre") ?? impresoraId,
-                        Ip = ip,
+                        Ip = ip ?? "",
                         Modelo = GetString(json, "modelo") ?? GetString(json, "printermodel"),
                         ModoImpresion = GetString(json, "modo_impresion"),
                         MacAddress = GetString(json, "mac_address"),
-                        FechaRegistro = DateTime.Now.ToString("o")
+                        FechaRegistro = DateTime.Now.ToString("o"),
+                        TipoConexion = tipoConexion,
+                        UsbUniqueKey = usbUniqueKey,
+                        UsbDevicePath = GetString(json, "usb_device_path"),
+                        UsbFriendlyName = GetString(json, "usb_friendly_name")
                     };
 
                     int puerto;
@@ -425,6 +456,42 @@ namespace PrinterServices.Api.Controllers
                 Log.Error("[PRINTER-SYNC] Error durante sincronización", ex);
                 var errorResponse = SyncResponseDto.Failure(ex.Message);
                 return ApiResult.Error(JsonConvert.SerializeObject(errorResponse)); // Retornar 500
+            }
+        }
+
+        /// <summary>
+        /// Descubre impresoras USB conectadas al equipo.
+        /// Análogo a un "ARP scan" pero para dispositivos USB.
+        /// Retorna VID, PID, Serial, DevicePath y FriendlyName de cada impresora encontrada.
+        /// El Front puede usar esta info para registrar impresoras USB (POST /api/printer/register).
+        /// </summary>
+        public ApiResult DiscoverUsbPrinters()
+        {
+            try
+            {
+                var devices = UsbDeviceEnumerator.EnumerateUsbPrinters();
+
+                var response = new
+                {
+                    count = devices.Count,
+                    printers = devices.ConvertAll(d => new
+                    {
+                        vid = d.Vid,
+                        pid = d.Pid,
+                        serialNumber = d.SerialNumber,
+                        uniqueKey = d.UniqueKey,
+                        devicePath = d.DevicePath,
+                        friendlyName = d.FriendlyName
+                    })
+                };
+
+                Log.InfoFormat("[PRINTER-USB] Descubrimiento USB: {0} impresora(s) encontrada(s)", devices.Count);
+                return ApiResult.Ok(JsonConvert.SerializeObject(response));
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[PRINTER-USB] Error descubriendo impresoras USB", ex);
+                return ApiResult.Error(ex.Message);
             }
         }
 

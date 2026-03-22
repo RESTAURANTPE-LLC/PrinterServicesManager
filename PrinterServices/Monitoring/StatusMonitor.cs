@@ -174,10 +174,11 @@ namespace PrinterServices.Monitoring
             List<PrinterEntity> printers;
             try
             {
-                // Consultar impresoras con IP válida
-                // RAZÓN: Sin IP no podemos verificar conectividad ni obtener MAC vía ARP
-                // FILTRO: ip IS NOT NULL AND ip != '' garantiza que tengan identificador de red
-                printers = _db.Query<PrinterEntity>("SELECT * FROM printers WHERE ip IS NOT NULL AND ip != ''");
+                // Consultar impresoras con IP válida (RED) o con USB key (USB)
+                // RAZÓN: Sin IP ni USB key no podemos verificar conectividad
+                // FILTRO: Impresoras de RED necesitan IP, impresoras USB necesitan usb_unique_key
+                printers = _db.Query<PrinterEntity>(
+                    "SELECT * FROM printers WHERE (ip IS NOT NULL AND ip != '') OR (usb_unique_key IS NOT NULL AND usb_unique_key != '')");
             }
             catch (Exception ex)
             {
@@ -275,25 +276,63 @@ namespace PrinterServices.Monitoring
                 {
                     // ═══════════════════════════════════════════════════════════════════════════════
                     // ESTRATEGIA INTELIGENTE: DLE EOT primero → Auto-detección SNMP → Optimización
+                    // Para USB: UsbPrinterStatusChecker (SetupAPI + DLE EOT vía USB)
                     // ═══════════════════════════════════════════════════════════════════════════════
-                    
-                    // PASO 1: Verificar conectividad básica con DLE EOT PRIMERO
-                    // RAZÓN: Confirmar que impresora está encendida antes de intentar SNMP
-                    // BENEFICIO: Evita timeout de SNMP (2s) cuando impresora está apagada
+
                     int checkTimeoutMs = ConfigManager.Instance.GetInt("TcpConnectTimeoutMs", 3000);
-                    PrinterStatus dleStatus = await PrinterStatusChecker.CheckAsync(
-                        printer.Ip, printer.Puerto, checkTimeoutMs, ct);
-                    
+                    PrinterStatus dleStatus;
+                    bool isUsbPrinter = printer.TipoConexion == "USB"
+                        && !string.IsNullOrEmpty(printer.UsbUniqueKey);
+
+                    if (isUsbPrinter)
+                    {
+                        // ═══════════════════════════════════════════════════════════
+                        // IMPRESORA USB: verificar por UsbUniqueKey (VID+PID+Serial)
+                        // ═══════════════════════════════════════════════════════════
+                        dleStatus = await UsbPrinterStatusChecker.CheckAsync(
+                            printer.UsbUniqueKey, checkTimeoutMs, ct);
+
+                        // Detectar si el DevicePath cambió (usuario movió de puerto USB)
+                        // Usa el DevicePath ya resuelto por UsbPrinterStatusChecker (sin re-enumerar)
+                        if (dleStatus.Online && !string.IsNullOrEmpty(dleStatus.ResolvedUsbDevicePath)
+                            && dleStatus.ResolvedUsbDevicePath != printer.UsbDevicePath)
+                        {
+                            Log.InfoFormat("[MONITOR] Impresora USB {0} cambió de puerto: {1} → {2}",
+                                printer.Nombre ?? printer.ImpresoraId,
+                                printer.UsbDevicePath ?? "(inicial)", dleStatus.ResolvedUsbDevicePath);
+                            printer.UsbDevicePath = dleStatus.ResolvedUsbDevicePath;
+                            // Se persiste más abajo con _db.Update(printer)
+                        }
+                    }
+                    else
+                    {
+                        // ═══════════════════════════════════════════════════════════
+                        // IMPRESORA RED: verificar por IP (comportamiento existente)
+                        // ═══════════════════════════════════════════════════════════
+                        dleStatus = await PrinterStatusChecker.CheckAsync(
+                            printer.Ip, printer.Puerto, checkTimeoutMs, ct);
+                    }
+
                     // Variable para resultado final (puede ser DLE EOT o SNMP)
                     PrinterStatus status = dleStatus;
 
+                    // SNMP solo aplica a impresoras de RED (USB no usa SNMP)
                     // Si impresora está OFFLINE, no intentar SNMP
                     // RAZÓN: Evitar timeout innecesario de 2 segundos en impresora apagada
                     // PRINCIPIO: No marcar SnmpEnabled=0 aquí (falso negativo si está apagada temporalmente)
-                    if (!dleStatus.Online)
+                    if (!dleStatus.Online || isUsbPrinter)
                     {
-                        Log.DebugFormat("[MONITOR] {0} ({1}) OFFLINE - omitiendo auto-detección SNMP",
-                            printer.Nombre ?? printer.ImpresoraId, printer.Ip);
+                        if (isUsbPrinter)
+                        {
+                            Log.DebugFormat("[MONITOR] {0} (USB:{1}) {2} - SNMP no aplica a USB",
+                                printer.Nombre ?? printer.ImpresoraId, printer.UsbUniqueKey,
+                                dleStatus.Online ? "ONLINE" : "OFFLINE");
+                        }
+                        else
+                        {
+                            Log.DebugFormat("[MONITOR] {0} ({1}) OFFLINE - omitiendo auto-detección SNMP",
+                                printer.Nombre ?? printer.ImpresoraId, printer.Ip);
+                        }
                         // status ya tiene resultado DLE EOT (offline)
                     }
                     else
@@ -468,17 +507,24 @@ namespace PrinterServices.Monitoring
                         // ★ DELEGAR búsqueda ARP a worker independiente (NO BLOQUEAR)
                         // ArpScanWorker procesará async en su propio hilo (~500ms)
                         // StatusMonitor continúa verificando otras impresoras inmediatamente
-                        if (!string.IsNullOrEmpty(printer.MacAddress))
+                        // NOTA: ARP solo aplica a impresoras de RED, USB no tiene ARP
+                        if (!isUsbPrinter)
                         {
-                            Log.InfoFormat("[MONITOR] Delegando búsqueda ARP a worker: {0} (MAC: {1})",
-                                printer.Nombre ?? printer.ImpresoraId, printer.MacAddress);
-                            
-                            // Encolar solicitud (no bloquea, retorna inmediatamente)
-                            _arpWorker?.EnqueueScan(printer.ImpresoraId);
+                            if (!string.IsNullOrEmpty(printer.MacAddress))
+                            {
+                                Log.InfoFormat("[MONITOR] Delegando búsqueda ARP a worker: {0} (MAC: {1})",
+                                    printer.Nombre ?? printer.ImpresoraId, printer.MacAddress);
+                                _arpWorker?.EnqueueScan(printer.ImpresoraId);
+                            }
+                            else
+                            {
+                                Log.WarnFormat("[MONITOR] Impresora {0} sin MAC — auto-resolución imposible",
+                                    printer.Nombre ?? printer.ImpresoraId);
+                            }
                         }
                         else
                         {
-                            Log.WarnFormat("[MONITOR] Impresora {0} sin MAC — auto-resolución imposible",
+                            Log.WarnFormat("[MONITOR] Impresora USB {0} OFFLINE — desconectada del puerto USB",
                                 printer.Nombre ?? printer.ImpresoraId);
                         }
                         
@@ -692,6 +738,16 @@ namespace PrinterServices.Monitoring
         {
             int timeoutMs = ConfigManager.Instance.GetInt("TcpConnectTimeoutMs", 3000);
             return PrinterStatusChecker.CheckSync(ip, port, timeoutMs);
+        }
+
+        /// <summary>
+        /// Verifica estado de una impresora USB por su UniqueKey.
+        /// Análogo a CheckPrinterNow para impresoras de red.
+        /// </summary>
+        public PrinterStatus CheckUsbPrinterNow(string usbUniqueKey)
+        {
+            int timeoutMs = ConfigManager.Instance.GetInt("TcpConnectTimeoutMs", 3000);
+            return UsbPrinterStatusChecker.CheckSync(usbUniqueKey, timeoutMs);
         }
     }
 }

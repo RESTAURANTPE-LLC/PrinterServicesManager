@@ -5292,3 +5292,96 @@ if (respuestaInterna.Tipo == SUCCESS)
 ### 34.7 Relación con regla 11 de vibe_qn_client_mode.md
 
 La regla 11 (4 capas de propagación de PrintJobResults) sigue vigente para el flujo **Controller → Server → WebServer → Client**. Este bug era una **capa 0** previa: la propagación **Controller → Controller** cuando hay delegación interna. La regla 11 asume que el Controller final ya tiene `PrintJobResults` correctos — este bug impedía que eso ocurriera.
+
+---
+
+## 35. Propagación de POS 57 (formato_comanda_mejorada) a PrinterServices
+
+### 35.1 Problema
+
+La configuración `CONFIGURACIONPOS_NUEVO_FORMATO_COMANDA_ETHERNET_MEJORADA` (POS 57, almacenada en `configuracionlocalpos`) controla si las comandas se imprimen como **bitmap renderizado desde HTML** en vez de texto plano ESC/POS. Cuando QuipuNet imprime directamente (modo Ethernet), `PrintUtil.ProcesarModoEthernet` evalúa la POS 57 y decide:
+
+```csharp
+// PrintUtil.ProcesarModoEthernet (líneas 1208-1218)
+if (Util.estaConfiguracionActivadaPOS3(Definitions.CONFIGURACIONPOS_NUEVO_FORMATO_COMANDA_ETHERNET_MEJORADA))
+{
+    string htmlInput = preimpresion.CadenaHTML ?? preimpresion.Cadena;
+    using (Bitmap bmp = HtmlBitmapRenderer.RenderSimpleHtmlAsBitmap(htmlInput))
+    using (Bitmap resized = ResizeIfNeeded(bmp, 576))
+        printer.PrintBitmap(resized);
+}
+else
+{
+    printer.printString(preimpresion.Cadena);
+}
+```
+
+**Problema**: PrinterServices NO tiene acceso a la base de datos de QuipuNet ni a `configuracionlocalpos`. Cuando el flag `USAR_PRINTER_SERVICE` está activo, la impresión la hace PrinterServices, pero este no sabía si la POS 57 estaba activa. Resultado: PrinterServices siempre imprimía en modo CADENA (texto plano), ignorando el formato mejorado HTML→Bitmap.
+
+### 35.2 Contexto: Cómo la POS 57 afecta la generación de Impresion
+
+La POS 57 tiene **dos efectos** en QuipuNet:
+
+1. **Selección de método en ComprobantePEController**:
+   ```csharp
+   // ComprobantePEController.getImpresionComanda()
+   if (Util.estaConfiguracionActivadaPOS3("57"))
+       return _getImpresionComandaMejorada(preimpresionList, esReimpresion);
+   else
+       return _getImpresionComandaNormal(preimpresionList, esReimpresion);
+   ```
+   - `_getImpresionComandaMejorada` llena **AMBOS** `Cadena` y `CadenaHTML` (con tags `<h2>`, `<h3>`, `<b>`, etc.)
+   - `_getImpresionComandaNormal` solo llena `Cadena` (texto plano)
+
+2. **Decisión de rendering en PrintUtil**: Si POS 57 activa → `CadenaHTML ?? Cadena` se renderiza como bitmap. Si inactiva → `Cadena` se envía como texto plano.
+
+### 35.3 Solución: Propagar el estado de POS 57 como campo JSON
+
+Se agrega el campo `formato_comanda_mejorada` al JSON que `EnriquecerImpresion` envía a PrinterServices. Este es el **único punto de inyección** necesario porque TODAS las llamadas a PS (comandas, ventas, precuentas, etc.) pasan por `EnriquecerImpresion`.
+
+### 35.4 Flujo resultante
+
+```
+QuipuNet Backend (EnriquecerImpresion)
+  └→ Lee POS 57 con estaConfiguracionActivadaPOS3("57")
+  └→ json["formato_comanda_mejorada"] = true/false
+  └→ json["cadena"] = texto plano (siempre)
+  └→ json["cadenaHTML"] = HTML con tags (solo si POS 57 activa y método Mejorada)
+
+PrinterServices (PrintController.ParsePrintJob)
+  └→ job.FormatoComandaMejorada = true/false
+
+PrinterServices (PrintWorker.BuildPayload) — orden de prioridad:
+  1. LineasImprimirJson → modo LINEAS (estructurado)
+  2. FormatoComandaMejorada=true → HTML→Bitmap (CadenaHTML ?? Cadena)
+  3. ContenidoHtml no vacío → HTML→Bitmap
+  4. Fallback → modo CADENA (texto plano)
+```
+
+### 35.5 Archivos modificados
+
+| Archivo | Proyecto | Cambio |
+|---|---|---|
+| `QuipuNetX/Services/Print/PrinterServiceClient.cs` | QuipuNetX | 1 línea en `EnriquecerImpresion`: `json["formato_comanda_mejorada"] = Util.estaConfiguracionActivadaPOS3("57")` |
+| `PrinterServices/Queue/PrintJob.cs` | PrinterServices | 1 propiedad: `bool FormatoComandaMejorada` |
+| `PrinterServices/Api/Controllers/PrintController.cs` | PrinterServices | Parseo de `formato_comanda_mejorada` en `ParsePrintJob` |
+| `PrinterServices/Workers/PrintWorker.cs` | PrinterServices | `BuildPayload` evalúa `FormatoComandaMejorada` para forzar HTML→Bitmap |
+
+### 35.6 Tabla de comportamiento por combinación
+
+| POS 57 | tipogeneracion impresora | cadenaHTML | Modo BuildPayload |
+|--------|--------------------------|------------|-------------------|
+| OFF | cualquiera | vacío | **CADENA** (texto plano) |
+| ON | TRADICIONAL | con HTML tags | **HTML→BITMAP** |
+| ON | MEJORADA | con HTML tags + lineasimprimir | **LINEAS** (tiene prioridad sobre HTML) |
+| OFF | MEJORADA | vacío + lineasimprimir | **LINEAS** |
+
+### 35.7 Compatibilidad
+
+- **Backward compatible**: Si `formato_comanda_mejorada` no viene en el JSON, `FormatoComandaMejorada` es `false` (default de `bool`). El comportamiento es idéntico al anterior.
+- **No requiere cambios en Controllers de negocio**: Las 13 llamadas a PrinterServiceClient desde PedidoController, DeliveryController, VentaController, PrecuentaController y PedidoprinterjobController se benefician automáticamente.
+- **No requiere persistencia en SQLite**: El flag es una decisión de rendering, no un dato del job. No se agrega columna a `print_jobs`.
+
+### 35.8 Relación con PrintUtil.ProcesarModoEthernet
+
+El `BuildPayload` de PrinterServices ahora replica exactamente el comportamiento de `PrintUtil.ProcesarModoEthernet` (líneas 1208-1218): cuando POS 57 está activa, usa `CadenaHTML ?? Cadena` como input para `HtmlBitmapRenderer.RenderSimpleHtmlAsBitmap()`, redimensiona a 576px de ancho, y envía como bitmap ESC/POS raster.

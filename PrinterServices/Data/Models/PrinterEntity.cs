@@ -54,6 +54,23 @@ namespace PrinterServices.Data.Models
         [Column("fecha_registro")]
         public string FechaRegistro { get; set; }
 
+        // ─── Campos USB: Identificación de impresoras conectadas por USB ──────────────
+        // RAZÓN: Análogo a MAC+IP para impresoras de red, pero para dispositivos USB.
+        // UsbUniqueKey es inmutable (VID+PID+Serial), UsbDevicePath cambia si el usuario
+        // mueve la impresora a otro puerto USB.
+
+        [Column("tipo_conexion")]
+        public string TipoConexion { get; set; }     // "RED" o "USB" (default "RED")
+
+        [Column("usb_unique_key")]
+        public string UsbUniqueKey { get; set; }     // "04B8_0202_J9SG012345" (inmutable, identifica unidad)
+
+        [Column("usb_device_path")]
+        public string UsbDevicePath { get; set; }    // Path actual (se actualiza si cambia de puerto USB)
+
+        [Column("usb_friendly_name")]
+        public string UsbFriendlyName { get; set; }  // Nombre legible (ej: "EPSON TM-T20II Receipt")
+
         public PrinterEntity()
         {
             Puerto = 9100;
@@ -64,6 +81,7 @@ namespace PrinterServices.Data.Models
             IpResueltaPorArp = 0;
             SnmpEnabled = 0;
             SnmpCommunity = "public";
+            TipoConexion = "RED";
         }
     }
 }

@@ -11,6 +11,7 @@ namespace PrinterServices.Monitoring
         public bool Online { get; set; }                      // ¿Responde en la red? (conexión TCP exitosa)
         public bool DisponibleParaImprimir { get; set; }      // ¿Puede imprimir ahora? (Online && !TapaAbierta && TienePapel)
         public bool TienePapel { get; set; }
+        public string ResolvedUsbDevicePath { get; set; }     // Solo USB: DevicePath resuelto (para detectar cambio de puerto)
         public bool TapaAbierta { get; set; }
         public bool ErrorRecuperable { get; set; }
         public string RawStatus { get; set; }

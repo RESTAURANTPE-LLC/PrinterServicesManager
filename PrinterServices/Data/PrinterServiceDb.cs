@@ -122,6 +122,46 @@ namespace PrinterServices.Data
                     Execute("ALTER TABLE printers ADD COLUMN snmp_community TEXT DEFAULT 'public'");
                     Log.Info("[DB] Columna 'snmp_community' agregada a tabla printers");
                 }
+
+                // ─── Migración USB: columnas para identificación de impresoras USB ───
+                bool hasTipoConexion = false;
+                bool hasUsbUniqueKey = false;
+                bool hasUsbDevicePath = false;
+                bool hasUsbFriendlyName = false;
+
+                foreach (var col in columns)
+                {
+                    var colDict2 = col as System.Collections.Generic.IDictionary<string, object>;
+                    if (colDict2 != null && colDict2.ContainsKey("name"))
+                    {
+                        string colName2 = colDict2["name"].ToString();
+                        if (colName2 == "tipo_conexion") hasTipoConexion = true;
+                        else if (colName2 == "usb_unique_key") hasUsbUniqueKey = true;
+                        else if (colName2 == "usb_device_path") hasUsbDevicePath = true;
+                        else if (colName2 == "usb_friendly_name") hasUsbFriendlyName = true;
+                    }
+                }
+
+                if (!hasTipoConexion)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN tipo_conexion TEXT DEFAULT 'RED'");
+                    Log.Info("[DB] Columna 'tipo_conexion' agregada a tabla printers");
+                }
+                if (!hasUsbUniqueKey)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN usb_unique_key TEXT");
+                    Log.Info("[DB] Columna 'usb_unique_key' agregada a tabla printers");
+                }
+                if (!hasUsbDevicePath)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN usb_device_path TEXT");
+                    Log.Info("[DB] Columna 'usb_device_path' agregada a tabla printers");
+                }
+                if (!hasUsbFriendlyName)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN usb_friendly_name TEXT");
+                    Log.Info("[DB] Columna 'usb_friendly_name' agregada a tabla printers");
+                }
             }
             catch (Exception ex)
             {
@@ -196,6 +236,9 @@ namespace PrinterServices.Data
                 Execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_printers_mac_unique ON printers(mac_address)");
                 Execute("CREATE INDEX IF NOT EXISTS idx_printer_status_log_fecha ON printer_status_log(fecha)");
                 Execute("CREATE INDEX IF NOT EXISTS idx_printer_status_log_imp ON printer_status_log(impresora_id, fecha)");
+                // Índice UNIQUE para usb_unique_key: una identidad USB = una sola impresora
+                // SQLite permite múltiples NULLs en UNIQUE, así que impresoras de RED no conflictúan
+                Execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_printers_usb_key ON printers(usb_unique_key)");
                 Execute("CREATE INDEX IF NOT EXISTS idx_notif_estado ON notificacionescambiosip(estado)");
                 Execute("CREATE INDEX IF NOT EXISTS idx_notif_mac ON notificacionescambiosip(mac_address)");
 
