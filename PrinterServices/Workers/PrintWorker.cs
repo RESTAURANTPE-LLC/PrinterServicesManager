@@ -418,18 +418,17 @@ namespace PrinterServices.Workers
             // Tiene prioridad sobre HTML→Bitmap (HtmlBitmapRenderer) y texto plano ESC/POS.
             if (job.FormatoAntiguoServicio && job.Documento != null)
             {
-                // ITipoDocumento genera el HTML con estructura CreaTicket
-                // (cabecera desde campos individuales + productos del HTML original)
-                string htmlDocumento = job.Documento.GenerarHtml();
-                if (!string.IsNullOrEmpty(htmlDocumento))
+                // ITipoDocumento genera List<RenderLine> (cabecera + productos)
+                // sin pasar por HTML — preserva fuente, tamaño, alineación del template
+                var renderLines = job.Documento.GenerarLineas();
+                if (renderLines != null && renderLines.Count > 0)
                 {
-                    Log.DebugFormat("[WORKER] Job {0} — modo FORMATO_ANTIGUO_SERVICIO ({1}→GDI bitmap)",
-                        job.JobId, job.Documento.GetType().Name);
+                    Log.DebugFormat("[WORKER] Job {0} — modo FORMATO_ANTIGUO_SERVICIO ({1}→{2} líneas→GDI bitmap)",
+                        job.JobId, job.Documento.GetType().Name, renderLines.Count);
                     var builder = new EscPosCommandBuilder(driver);
                     builder.Init();
 
-                    using (Bitmap bmp = Rendering.ComandaBitmapRenderer.RenderAsBitmap(
-                        htmlDocumento, job.TamanioLetra))
+                    using (Bitmap bmp = Rendering.ComandaBitmapRenderer.RenderFromLines(renderLines))
                     using (Bitmap resized = BitmapResizer.ResizeIfNeeded(bmp, 576))
                     {
                         builder.AddBitmapFromImage(resized);

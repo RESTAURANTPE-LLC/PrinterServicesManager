@@ -100,6 +100,7 @@
     <Compile Include="Drivers\BixolonDriver.cs" />
     <Compile Include="Drivers\EscPosCommandBuilder.cs" />
     <Compile Include="Drivers\LineaParser.cs" />
+    <Compile Include="Rendering\RenderLine.cs" />
     <Compile Include="Transport\ITransport.cs" />
     <Compile Include="Transport\TcpTransport.cs" />
     <Compile Include="Transport\UsbDeviceIdentity.cs" />
@@ -141,6 +142,7 @@
     <Compile Include="Queue\Documents\ITipoDocumento.cs" />
     <Compile Include="Queue\Documents\ComandaDocument.cs" />
     <Compile Include="Queue\Documents\TipoDocumentoFactory.cs" />
+    <Compile Include="Queue\Documents\ComandaTemplateModel.cs" />
     <Compile Include="Rendering\BitmapResizer.cs" />
     <Compile Include="Core\Network\ArpHelper.cs" />
     <Compile Include="Core\Network\MacAddressNormalizer.cs" />
