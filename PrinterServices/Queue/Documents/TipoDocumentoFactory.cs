@@ -57,6 +57,10 @@ namespace PrinterServices.Queue.Documents
                 PedidoId = GetString(json, "pedido_id"),
                 MotivoAnulacion = GetString(json, "motivo_anulacion"),
                 TipoComanda = GetString(json, "tipo_comanda"),
+                // Campos de anulación: AnuladoPor usa "mozo" (quién anuló),
+                // DeliveryAnulacion usa "delivery_identificadorunico"
+                AnuladoPor = GetString(json, "mozo"),
+                DeliveryAnulacion = GetString(json, "delivery_identificadorunico"),
                 ProductosHtml = ExtractProductosHtml(cadenaHtml)
             };
         }

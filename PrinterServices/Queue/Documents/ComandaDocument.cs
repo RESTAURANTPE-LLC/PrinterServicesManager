@@ -52,6 +52,9 @@ namespace PrinterServices.Queue.Documents
         public string PedidoId { get; set; }
         public string MotivoAnulacion { get; set; }
         public string TipoComanda { get; set; }
+        // Campos nuevos para anulación y reimpresión
+        public string AnuladoPor { get; set; }          // Quién anuló (en anulación, usa campo mozo)
+        public string DeliveryAnulacion { get; set; }   // ID delivery en contexto de anulación
 
         // ─── Productos (HTML de ImpresionController) ───
         public string ProductosHtml { get; set; }
@@ -88,16 +91,42 @@ namespace PrinterServices.Queue.Documents
         // ═══════════════════════════════════════════════════════════════════
 
         /// <summary>
-        /// Detecta el contexto actual: "Anulacion", "Delivery" o "Salon".
-        /// Usa las mismas condiciones que _getImpresionComandaMejorada.
+        /// Detecta el contexto compuesto: "{Modulo}_{Estado}".
+        /// Modulo: "Salon", "Delivery", "VentaRapida", "SelfService"
+        /// Estado: "Normal", "Anulacion", "Reimpresion"
+        /// Retorna contexto compuesto ej: "Salon_Normal", "Delivery_Anulacion"
         /// </summary>
         private string DetectarContexto()
         {
-            // ── ANULACIÓN ──
-            // Señales: TipoComanda = "2" (COMANDA_TIPO_DELETE)
-            //          TipoImpresion = "0" (TIPO_ANULADO)
-            //          TipoImpresion contiene "ANULA" o es "3"
-            //          TipoImpresion resuelta contiene "ANULACION"
+            string modulo = DetectarModulo();
+            string estado = DetectarEstado();
+            string compuesto = modulo + "_" + estado;
+            Log.DebugFormat("[COMANDA-DOC] Contexto compuesto: {0} (modulo={1}, estado={2})", compuesto, modulo, estado);
+            return compuesto;
+        }
+
+        /// <summary>Detecta el módulo: Delivery, VentaRapida, SelfService o Salon</summary>
+        private string DetectarModulo()
+        {
+            // Delivery: DeliveryId + ModalidadEntrega tienen valor
+            if (!string.IsNullOrEmpty(DeliveryId) && !string.IsNullOrEmpty(ModalidadEntrega))
+                return "Delivery";
+            // Modalidad contiene DELIVERY
+            if (!string.IsNullOrEmpty(Modalidad)
+                && Modalidad.ToUpperInvariant().Contains("DELIVERY"))
+                return "Delivery";
+            // VentaRapida: Modalidad es VENTA_RAPIDA
+            if (!string.IsNullOrEmpty(Modalidad)
+                && Modalidad.Equals("VENTA_RAPIDA", StringComparison.OrdinalIgnoreCase))
+                return "VentaRapida";
+
+            return "Salon";
+        }
+
+        /// <summary>Detecta el estado: Anulacion, Reimpresion o Normal</summary>
+        private string DetectarEstado()
+        {
+            // Anulación: TipoComanda = "2" o TipoImpresion indica anulación
             if (!string.IsNullOrEmpty(TipoComanda) && TipoComanda == "2")
                 return "Anulacion";
             if (!string.IsNullOrEmpty(TipoImpresion))
@@ -106,40 +135,45 @@ namespace PrinterServices.Queue.Documents
                 if (upper == "0" || upper == "3" || upper.Contains("ANULA"))
                     return "Anulacion";
             }
+            // Reimpresión: TipoImpresion = "2"
             string tipoResuelto = ResolveTipoImpresion(TipoImpresion);
-            if (tipoResuelto != null && tipoResuelto.Contains("ANULACION"))
-                return "Anulacion";
+            if (tipoResuelto != null && tipoResuelto.Contains("RE-IMPRESION"))
+                return "Reimpresion";
 
-            // ── DELIVERY ──
-            // Señales: Modalidad contiene "DELIVERY" (puede ser "DELIVERY" directo)
-            //          DeliveryId tiene valor (señal indirecta de que es delivery)
-            //          Modalidad = "-1" NO es delivery (es PARAM_TODOS, valor por defecto)
-            if (!string.IsNullOrEmpty(Modalidad)
-                && Modalidad.ToUpperInvariant().Contains("DELIVERY"))
-                return "Delivery";
-            // Si DeliveryId tiene valor y hay campos de delivery poblados, es delivery
-            if (!string.IsNullOrEmpty(DeliveryId) && !string.IsNullOrEmpty(ModalidadEntrega))
-                return "Delivery";
-
-            return "Salon";
+            return "Normal";
         }
 
         /// <summary>
-        /// Verifica si un campo aplica al contexto actual.
-        /// Reglas HARDCODEADAS por FieldName — no depende de que el template tenga Context.
-        /// Replica las mismas condiciones de _getImpresionComandaMejorada.
+        /// Verifica si un campo aplica al contexto compuesto actual (Modulo_Estado).
+        /// Reglas hardcodeadas por FieldName. Extrae módulo y estado del contexto compuesto.
         /// </summary>
-        private bool CampoAplicaAlContexto(string fieldName, string contexto)
+        private bool CampoAplicaAlContexto(string fieldName, string contextoCompuesto)
         {
+            // Extraer módulo y estado: "Salon_Normal" → modulo="Salon", estado="Normal"
+            string modulo = "Salon";
+            string estado = "Normal";
+            if (!string.IsNullOrEmpty(contextoCompuesto) && contextoCompuesto.Contains("_"))
+            {
+                var parts = contextoCompuesto.Split('_');
+                modulo = parts[0];
+                estado = parts.Length > 1 ? parts[1] : "Normal";
+            }
+
             switch (fieldName)
             {
-                // ── Solo ANULACION ──
+                // ── Solo estado ANULACION (cualquier módulo) ──
                 case "MarcoAnulacion":
-                case "MozoPedido":      // COMANDADO POR
+                case "AnuladoPor":       // ANULADO POR (quién anuló)
+                case "MozoPedido":       // COMANDADO POR (quién hizo el pedido)
                 case "MotivoAnulacion":
-                    return contexto == "Anulacion";
+                case "DeliveryAnulacion": // DELIVERY: X en anulación
+                    return estado == "Anulacion";
 
-                // ── Solo DELIVERY ──
+                // ── Solo estado REIMPRESION ──
+                case "Duplicada":
+                    return estado == "Reimpresion";
+
+                // ── Solo módulo DELIVERY (cualquier estado) ──
                 case "DeliveryId":
                 case "ModalidadEntrega":
                 case "HoraRecojo":
@@ -147,15 +181,20 @@ namespace PrinterServices.Queue.Documents
                 case "Canal":
                 case "TiempoPreparacion":
                 case "PedidoId":
-                    return contexto == "Delivery";
+                    return modulo == "Delivery";
 
-                // ── Solo SALON ──
+                // ── Solo módulo SALON (cualquier estado) ──
                 case "Salon":
                 case "Subcuenta":
                 case "Localizador":
-                    return contexto == "Salon";
+                    return modulo == "Salon";
 
-                // ── TODOS los contextos ──
+                // ── Mesa/CantPax: no aplica en Delivery ──
+                case "Mesa":
+                case "CantPax":
+                    return modulo != "Delivery";
+
+                // ── Todos los demás: disponibles en cualquier combinación ──
                 default:
                     return true;
             }
@@ -189,6 +228,14 @@ namespace PrinterServices.Queue.Documents
                 string effAlign = field.GetEffectiveAlignment(contexto);
 
                 // ── Campos especiales ──
+                // Duplicada: texto de reimpresión (usa Label como texto completo)
+                if (field.FieldName == "Duplicada")
+                {
+                    string textoReimpresion = !string.IsNullOrEmpty(effLabel)
+                        ? effLabel : "**COMANDA DUPLICADA**";
+                    lines.Add(new RenderLine(textoReimpresion, effFont, effSize, effBold, effItalic, effAlign ?? "Center"));
+                    continue;
+                }
                 if (field.FieldName == "ProductosHtml")
                 {
                     lines.AddRange(ParseProductosHtml());
@@ -218,8 +265,8 @@ namespace PrinterServices.Queue.Documents
                 }
                 if (field.FieldName == "MarcoAnulacion")
                 {
-                    // Solo renderizar si realmente es anulación
-                    if (contexto == "Anulacion")
+                    // Solo renderizar si el estado es anulación (contexto contiene "_Anulacion")
+                    if (contexto.Contains("_Anulacion"))
                         lines.AddRange(GenerarMarcoAnulacion(field));
                     continue;
                 }
@@ -395,6 +442,9 @@ namespace PrinterServices.Queue.Documents
                 case "NotaMesa": return NotaMesa;
                 case "PedidoId": return PedidoId;
                 case "MotivoAnulacion": return MotivoAnulacion;
+                case "AnuladoPor": return AnuladoPor;
+                case "DeliveryAnulacion": return DeliveryAnulacion;
+                case "Duplicada": return null; // Duplicada usa Label como texto, no necesita valor
                 default: return null;
             }
         }
