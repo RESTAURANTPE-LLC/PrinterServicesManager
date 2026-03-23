@@ -165,7 +165,7 @@ namespace PrinterServices.Api
 
                 // RAZÓN: Intentar ruteo normal primero
                 var result = await _router.RouteAsync(request.HttpMethod, request.Url.AbsolutePath, request);
-                
+
                 // RAZÓN: Si result es null, es una ruta especial (dashboard HTML)
                 if (result == null)
                 {

@@ -48,6 +48,7 @@ namespace PrinterServices.Queue
         public string QrEncuesta { get; set; }            // Contenido del QR de encuesta (separado de QrData)
         public bool FormatoComandaMejorada { get; set; }  // POS 57: forzar HTML→Bitmap en BuildPayload
         public bool FormatoAntiguoServicio { get; set; } // Feature flag: renderizar comanda con fuentes GDI como el servicio antiguo
+        public bool UtilizarDisenadorComandas { get; set; } // Feature flag: usar diseñador visual (ComandaDocument) con PRIORIDAD sobre lineasimprimir
         public Documents.ITipoDocumento Documento { get; set; } // Documento tipado (ComandaDocument, VentaDocument, etc.) — genera HTML estilo CreaTicket
 
         public PrintJobStatus Estado { get; set; }

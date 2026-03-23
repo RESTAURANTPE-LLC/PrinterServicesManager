@@ -240,9 +240,26 @@ namespace PrinterServices.Api.Controllers
                     : fasToken.ToString() == "1" || fasToken.ToString().Equals("true", StringComparison.OrdinalIgnoreCase);
             }
 
+            // Feature flag: utilizar diseñador visual de comandas (prioridad sobre lineasimprimir)
+            JToken udcToken;
+            if (json.TryGetValue("utilizar_disenador_comandas", StringComparison.OrdinalIgnoreCase, out udcToken))
+            {
+                job.UtilizarDisenadorComandas = udcToken.Type == JTokenType.Boolean
+                    ? udcToken.Value<bool>()
+                    : udcToken.ToString() == "1" || udcToken.ToString().Equals("true", StringComparison.OrdinalIgnoreCase);
+            }
+
             // Si formato antiguo está activo, crear ITipoDocumento desde el JSON
             // El Factory extrae los campos individuales (Mesa, Mozo, etc.) y genera HTML estilo CreaTicket
             if (job.FormatoAntiguoServicio)
+            {
+                string tipo = job.TipoImpresion ?? "comanda";
+                job.Documento = TipoDocumentoFactory.Create(json, tipo);
+            }
+
+            // Si diseñador visual está activo, también crear ITipoDocumento (mismo factory)
+            // RAZÓN: UtilizarDisenadorComandas usa el mismo sistema pero con prioridad distinta en BuildPayload
+            if (job.UtilizarDisenadorComandas && job.Documento == null)
             {
                 string tipo = job.TipoImpresion ?? "comanda";
                 job.Documento = TipoDocumentoFactory.Create(json, tipo);

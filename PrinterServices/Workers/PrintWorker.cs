@@ -399,6 +399,57 @@ namespace PrinterServices.Workers
 
         private byte[] BuildPayload(IPrinterDriver driver, PrintJob job)
         {
+            // ─── PRIORIDAD 0.5: DISEÑADOR VISUAL (ComandaDocument con prioridad absoluta) ───
+            // Si el flag está activo, usa ComandaDocument para generar el ticket renderizado como bitmap.
+            // Tiene PRIORIDAD sobre lineasimprimir (modo LINEAS) para forzar el uso del diseñador visual.
+            // Si falla, lanza excepción → job queda FAILED (fail-fast, no fallback).
+            if (job.UtilizarDisenadorComandas && job.Documento != null)
+            {
+                try
+                {
+                    // ITipoDocumento genera List<RenderLine> desde los campos enriquecidos
+                    var renderLines = job.Documento.GenerarLineas();
+                    if (renderLines != null && renderLines.Count > 0)
+                    {
+                        Log.InfoFormat("[WORKER] Job {0} — modo DISEÑADOR_VISUAL ({1}→{2} líneas→bitmap)",
+                            job.JobId, job.Documento.GetType().Name, renderLines.Count);
+                        
+                        var builder = new EscPosCommandBuilder(driver);
+                        builder.Init();
+
+                        // Renderizar líneas como bitmap con fuentes GDI (ComandaBitmapRenderer)
+                        using (Bitmap bmp = Rendering.ComandaBitmapRenderer.RenderFromLines(renderLines))
+                        using (Bitmap resized = BitmapResizer.ResizeIfNeeded(bmp, 576))
+                        {
+                            builder.AddBitmapFromImage(resized);
+                        }
+
+                        if (job.AbreGaveta)
+                        {
+                            builder.OpenCashDrawer();
+                        }
+
+                        builder.Cut(CutType.Partial);
+                        return builder.Build();
+                    }
+                    else
+                    {
+                        // Si GenerarLineas() retorna null o vacío, lanzar excepción
+                        throw new InvalidOperationException(
+                            string.Format("ComandaDocument.GenerarLineas() retornó null o vacío para job {0}", job.JobId));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Fail-fast: NO hay fallback a lineasimprimir cuando el diseñador está activo.
+                    // El job debe fallar para alertar de bugs en ComandaDocument.
+                    Log.ErrorFormat("[WORKER] Job {0} — DISEÑADOR_VISUAL FALLÓ: {1}", job.JobId, ex.Message);
+                    Log.ErrorFormat("[WORKER] StackTrace: {0}", ex.StackTrace);
+                    throw; // Relanzar excepción → job queda FAILED
+                }
+            }
+
+            // ─── PRIORIDAD 1: LINEAS (modo estructurado JSON array) ───
             // Si tiene lineasimprimir, usar modo estructurado
             if (!string.IsNullOrEmpty(job.LineasImprimirJson))
             {
@@ -410,7 +461,7 @@ namespace PrinterServices.Workers
                 }
             }
 
-            // ─── Feature flag: FORMATO ANTIGUO SERVICIO ───
+            // ─── PRIORIDAD 2: Feature flag FORMATO ANTIGUO SERVICIO ───
             // Si está activo, renderiza la cadenaHTML como bitmap con fuentes GDI
             // (Arial Bold, Italic, Lucida Console) replicando el visual del servicio antiguo.
             // Usa cadenaHTML que tiene tags h2-h4/b/i generados por ImpresionController.
