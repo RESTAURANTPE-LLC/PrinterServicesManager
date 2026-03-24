@@ -476,7 +476,7 @@ namespace PrinterServices.Queue.Documents
 
         private static string GetTemplatePath()
         {
-            string appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             return Path.Combine(appDataPath, "QuipuNet", "template_comanda.txt");
         }
     }
