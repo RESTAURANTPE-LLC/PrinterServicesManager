@@ -123,16 +123,19 @@ namespace PrinterServices.Queue.Documents
             return "Salon";
         }
 
-        /// <summary>Detecta el estado: Anulacion, Reimpresion o Normal</summary>
+        /// <summary>Detecta el estado: Anulacion, Reimpresion, Modificacion o Normal</summary>
         private string DetectarEstado()
         {
+            // Modificación: TipoComanda = "3" (COMANDA_TIPO_UPDATE)
+            if (!string.IsNullOrEmpty(TipoComanda) && TipoComanda == "3")
+                return "Modificacion";
             // Anulación: TipoComanda = "2" o TipoImpresion indica anulación
             if (!string.IsNullOrEmpty(TipoComanda) && TipoComanda == "2")
                 return "Anulacion";
             if (!string.IsNullOrEmpty(TipoImpresion))
             {
                 string upper = TipoImpresion.ToUpperInvariant();
-                if (upper == "0" || upper == "3" || upper.Contains("ANULA"))
+                if (upper == "0" || upper.Contains("ANULA"))
                     return "Anulacion";
             }
             // Reimpresión: TipoImpresion = "2"
@@ -168,6 +171,10 @@ namespace PrinterServices.Queue.Documents
                 case "MotivoAnulacion":
                 case "DeliveryAnulacion": // DELIVERY: X en anulación
                     return estado == "Anulacion";
+
+                // ── Solo estado MODIFICACION (cualquier módulo) ──
+                case "MarcoModificacion":
+                    return estado == "Modificacion";
 
                 // ── Solo estado REIMPRESION ──
                 case "Duplicada":
@@ -270,6 +277,12 @@ namespace PrinterServices.Queue.Documents
                         lines.AddRange(GenerarMarcoAnulacion(field));
                     continue;
                 }
+                if (field.FieldName == "MarcoModificacion")
+                {
+                    if (contexto.Contains("_Modificacion"))
+                        lines.AddRange(GenerarMarcoModificacion(field));
+                    continue;
+                }
 
                 // ── Campos normales: obtener valor y armar texto ──
                 string value = GetFieldValue(field.FieldName);
@@ -291,6 +304,15 @@ namespace PrinterServices.Queue.Documents
         private List<RenderLine> GenerarLineasDefault()
         {
             var lines = new List<RenderLine>();
+
+            // Marco de modificación en modo default (sin template)
+            if (!string.IsNullOrEmpty(TipoComanda) && TipoComanda == "3")
+            {
+                lines.Add(new RenderLine("****************************", "Arial", 13, true, false, "Center"));
+                lines.Add(new RenderLine("*  PEDIDO MODIFICADO       *", "Arial", 13, true, false, "Center"));
+                lines.Add(new RenderLine("****************************", "Arial", 13, true, false, "Center"));
+                lines.Add(RenderLine.Empty());
+            }
 
             AddIfNotEmpty(lines, "Operación:", Operacion, "Arial", 13, true, false, "Left");
             AddIfNotEmpty(lines, "N°:", Serie, "Arial", 13, true, false, "Left");
@@ -376,6 +398,24 @@ namespace PrinterServices.Queue.Documents
         }
 
         // ═══════════════════════════════════════════════════════════════════
+        // Marco de modificación (****PEDIDO MODIFICADO****)
+        // ═══════════════════════════════════════════════════════════════════
+
+        private List<RenderLine> GenerarMarcoModificacion(TemplateFieldDto field)
+        {
+            var lines = new List<RenderLine>();
+            string ff = field.FontFamily ?? "Arial";
+            float fs = (float)field.FontSize;
+
+            lines.Add(new RenderLine("****************************", ff, fs, true, false, "Center"));
+            lines.Add(new RenderLine("*  PEDIDO MODIFICADO       *", ff, fs, true, false, "Center"));
+            if (!string.IsNullOrEmpty(Mesa))
+                lines.Add(new RenderLine("*  MESA: " + Mesa + "  *", ff, fs, true, false, "Center"));
+            lines.Add(new RenderLine("****************************", ff, fs, true, false, "Center"));
+
+            return lines;
+        }
+
         // Marco de anulación (****ANULADO****)
         // ═══════════════════════════════════════════════════════════════════
 
@@ -455,7 +495,8 @@ namespace PrinterServices.Queue.Documents
             string upper = tipo.ToUpperInvariant();
             if (upper.Contains("AGREGADO") || upper == "1" || upper == "ADD") return "** AGREGADO **";
             if (upper.Contains("REIMPRESION") || upper.Contains("RE-IMPRESION") || upper == "2") return "** RE-IMPRESION **";
-            if (upper.Contains("ANULA") || upper == "3") return "** ANULACION **";
+            if (upper.Contains("MODIFICADO") || upper == "UPDATE") return "** PEDIDO MODIFICADO **";
+            if (upper.Contains("ANULA") || upper == "0") return "** ANULACION **";
             return null;
         }
 
