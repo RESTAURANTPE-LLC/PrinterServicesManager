@@ -18,7 +18,10 @@
 <body class="bg-gray-900 text-white">
     <div class="container mx-auto p-4">
         <header class="mb-6">
-            <h1 class="text-4xl font-bold mb-2">🖨️ PrinterServices Dashboard</h1>
+            <div class="flex items-center gap-4 mb-2">
+                <h1 class="text-4xl font-bold">🖨️ PrinterServices Dashboard</h1>
+                <span id="version-badge" class="px-3 py-1 bg-blue-700 text-blue-100 text-sm font-mono rounded-full">v-.-.-</span>
+            </div>
             <p class="text-gray-400" id="refresh-mode-label">Modo: Actualización manual</p>
             <p class="text-sm text-gray-500">Última actualización: <span id="last-update">-</span></p>
             <div class="flex items-center gap-4 mt-3">
@@ -296,6 +299,11 @@
         // Actualizar dashboard
         function updateDashboard(data) {
             document.getElementById('last-update').textContent = new Date(data.timestamp).toLocaleTimeString();
+
+            // Versión del servicio
+            if (data.version) {
+                document.getElementById('version-badge').textContent = 'v' + data.version;
+            }
             
             // Red
             const netStatus = data.network.current;

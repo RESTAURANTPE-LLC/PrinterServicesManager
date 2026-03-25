@@ -222,6 +222,32 @@ namespace PrinterServices.Data
                 Log.Warn("[DB] Error en migración es_cliente (job_status_callbacks): " + ex.Message);
             }
 
+            // Migración: agregar columna printer_response a print_jobs si no existe
+            // RAZÓN: Guardar respuesta DLE EOT raw en cada intento de impresión para diagnóstico
+            try
+            {
+                var prCols = Query<dynamic>("PRAGMA table_info(print_jobs)");
+                bool hasPrinterResponse = false;
+                foreach (var col in prCols)
+                {
+                    var colDict = col as System.Collections.Generic.IDictionary<string, object>;
+                    if (colDict != null && colDict.ContainsKey("name") && colDict["name"]?.ToString() == "printer_response")
+                    {
+                        hasPrinterResponse = true;
+                        break;
+                    }
+                }
+                if (!hasPrinterResponse)
+                {
+                    Execute("ALTER TABLE print_jobs ADD COLUMN printer_response TEXT");
+                    Log.Info("[DB] Columna 'printer_response' agregada a tabla print_jobs");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("[DB] Error en migración printer_response: " + ex.Message);
+            }
+
             // Crear índices adicionales
             try
             {

@@ -265,6 +265,13 @@ namespace PrinterServices.Api.Controllers
                 job.Documento = TipoDocumentoFactory.Create(json, tipo);
             }
 
+            // Persistir JSON original para recrear ComandaDocument en retry
+            // Sin esto, al reintentar un job desde BD, Documento es null y cae al formato legacy
+            if (job.UtilizarDisenadorComandas || job.FormatoAntiguoServicio)
+            {
+                job.DocumentoJson = json.ToString(Newtonsoft.Json.Formatting.None);
+            }
+
             // Copias para promociones: si viene promocionsorteo_cantidadimpresiones, usar como Copias
             // RAZÓN: imprimirPromociones() imprime N copias del sorteo. Es distinto de areaproduccion_numerocopias (comandas).
             string promoCopias = GetString(json, "promocionsorteo_cantidadimpresiones");

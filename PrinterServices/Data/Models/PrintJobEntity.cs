@@ -111,6 +111,15 @@ namespace PrinterServices.Data.Models
         [Column("formato_antiguo_servicio")]
         public int FormatoAntiguoServicio { get; set; }  // 1 = renderizar con fuentes GDI como servicio antiguo
 
+        [Column("utilizar_disenador_comandas")]
+        public int UtilizarDisenadorComandas { get; set; }  // 1 = usar ComandaDocument (diseñador visual) con prioridad sobre lineasimprimir
+
+        [Column("documento_json")]
+        public string DocumentoJson { get; set; }  // JSON original del request para recrear ComandaDocument en retry
+
+        [Column("printer_response")]
+        public string PrinterResponse { get; set; }  // Respuesta DLE EOT raw del pre-check (ej: "P:16 O:12 E:12 S:12")
+
         public PrintJobEntity()
         {
             Copias = 1;

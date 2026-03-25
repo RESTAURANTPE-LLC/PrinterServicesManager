@@ -50,11 +50,13 @@ namespace PrinterServices.Queue
         public bool FormatoAntiguoServicio { get; set; } // Feature flag: renderizar comanda con fuentes GDI como el servicio antiguo
         public bool UtilizarDisenadorComandas { get; set; } // Feature flag: usar diseñador visual (ComandaDocument) con PRIORIDAD sobre lineasimprimir
         public Documents.ITipoDocumento Documento { get; set; } // Documento tipado (ComandaDocument, VentaDocument, etc.) — genera HTML estilo CreaTicket
+        public string DocumentoJson { get; set; } // JSON original del request para recrear ComandaDocument en retry
 
         public PrintJobStatus Estado { get; set; }
         public int Reintentos { get; set; }
         public int MaxReintentos { get; set; }
         public string ErrorMensaje { get; set; }
+        public string PrinterResponse { get; set; }  // Respuesta DLE EOT raw del pre-check
         public DateTime FechaCreacion { get; set; }
         public DateTime? FechaImpresion { get; set; }
 
@@ -93,6 +95,7 @@ namespace PrinterServices.Queue
                 Reintentos = this.Reintentos,
                 MaxReintentos = this.MaxReintentos,
                 ErrorMensaje = this.ErrorMensaje,
+                PrinterResponse = this.PrinterResponse,
                 FechaCreacion = this.FechaCreacion.ToString("o"),
                 FechaImpresion = this.FechaImpresion?.ToString("o"),
                 LineasImprimirJson = this.LineasImprimirJson,
@@ -107,7 +110,9 @@ namespace PrinterServices.Queue
                 FacturacionElectronica = this.FacturacionElectronica ? 1 : 0,  // Fase 7B: persistir flag FE
                 TamanioQr = this.TamanioQr,                                    // Fase 7B: persistir tamaño QR
                 QrEncuesta = this.QrEncuesta,                                  // Fase 7B: persistir QR encuesta
-                FormatoAntiguoServicio = this.FormatoAntiguoServicio ? 1 : 0   // Feature flag formato antiguo
+                FormatoAntiguoServicio = this.FormatoAntiguoServicio ? 1 : 0,  // Feature flag formato antiguo
+                UtilizarDisenadorComandas = this.UtilizarDisenadorComandas ? 1 : 0,  // Feature flag diseñador visual
+                DocumentoJson = this.DocumentoJson                                    // JSON para recrear ComandaDocument en retry
             };
         }
 
@@ -132,7 +137,7 @@ namespace PrinterServices.Queue
                 fechaImpresion = tempFecha;
             }
 
-            return new PrintJob
+            var job = new PrintJob
             {
                 JobId = entity.JobId,
                 ComandaId = entity.ComandaId,
@@ -153,6 +158,7 @@ namespace PrinterServices.Queue
                 Reintentos = entity.Reintentos,
                 MaxReintentos = entity.MaxReintentos,
                 ErrorMensaje = entity.ErrorMensaje,
+                PrinterResponse = entity.PrinterResponse,
                 FechaCreacion = fechaCreacion,
                 FechaImpresion = fechaImpresion,
                 Puerto = 9100,
@@ -170,8 +176,25 @@ namespace PrinterServices.Queue
                 FacturacionElectronica = entity.FacturacionElectronica == 1,    // Fase 7B: restaurar flag FE
                 TamanioQr = entity.TamanioQr,                                  // Fase 7B: restaurar tamaño QR
                 QrEncuesta = entity.QrEncuesta,                                // Fase 7B: restaurar QR encuesta
-                FormatoAntiguoServicio = entity.FormatoAntiguoServicio == 1     // Feature flag formato antiguo
+                FormatoAntiguoServicio = entity.FormatoAntiguoServicio == 1,    // Feature flag formato antiguo
+                UtilizarDisenadorComandas = entity.UtilizarDisenadorComandas == 1,  // Feature flag diseñador visual
+                DocumentoJson = entity.DocumentoJson                                // JSON para recrear Documento
             };
+
+            // Recrear ComandaDocument desde JSON persistido para que retry use el diseñador
+            if (!string.IsNullOrEmpty(job.DocumentoJson)
+                && (job.UtilizarDisenadorComandas || job.FormatoAntiguoServicio))
+            {
+                try
+                {
+                    var json = Newtonsoft.Json.Linq.JObject.Parse(job.DocumentoJson);
+                    string tipo = job.TipoImpresion ?? "comanda";
+                    job.Documento = Documents.TipoDocumentoFactory.Create(json, tipo);
+                }
+                catch { } // Si falla, Documento queda null → fallback a cadena/lineas
+            }
+
+            return job;
         }
 
     }

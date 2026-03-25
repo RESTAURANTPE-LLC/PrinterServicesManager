@@ -67,11 +67,15 @@ namespace PrinterServices.Api.Controllers
                 ctx.Response.StatusCode = 200;
                 ctx.Response.Close();
             }
+            catch (HttpListenerException)
+            {
+                Log.Debug("[DASHBOARD] Cliente desconectado antes de completar respuesta (html)");
+                try { ctx.Response.Close(); } catch { }
+            }
             catch (Exception ex)
             {
                 Log.Error("[DASHBOARD] Error sirviendo HTML: " + ex.Message, ex);
-                ctx.Response.StatusCode = 500;
-                ctx.Response.Close();
+                try { ctx.Response.StatusCode = 500; ctx.Response.Close(); } catch { }
             }
         }
 
@@ -120,6 +124,7 @@ namespace PrinterServices.Api.Controllers
                     fechaCreacion = job.FechaCreacion,
                     fechaImpresion = job.FechaImpresion,
                     errorMensaje = job.ErrorMensaje,
+                    printerResponse = job.PrinterResponse,
                     contenido = job.Contenido,
                     abreGaveta = job.AbreGaveta,
                     codigoCorte = job.CodigoCorte
@@ -133,11 +138,15 @@ namespace PrinterServices.Api.Controllers
                 ctx.Response.StatusCode = 200;
                 ctx.Response.Close();
             }
+            catch (HttpListenerException)
+            {
+                Log.Debug("[DASHBOARD] Cliente desconectado antes de completar respuesta (job-detail)");
+                try { ctx.Response.Close(); } catch { }
+            }
             catch (Exception ex)
             {
                 Log.Error("[DASHBOARD] Error obteniendo detalle de job: " + ex.Message, ex);
-                ctx.Response.StatusCode = 500;
-                ctx.Response.Close();
+                try { ctx.Response.StatusCode = 500; ctx.Response.Close(); } catch { }
             }
         }
 
@@ -203,12 +212,16 @@ namespace PrinterServices.Api.Controllers
                 ctx.Response.StatusCode = 200;
                 ctx.Response.Close();
             }
+            catch (HttpListenerException)
+            {
+                Log.Debug("[DASHBOARD] Cliente desconectado antes de completar respuesta (history)");
+                try { ctx.Response.Close(); } catch { }
+            }
             catch (Exception ex)
             {
                 Log.Error("[DASHBOARD] Error obteniendo historial: " + ex.Message, ex);
                 try
                 {
-                    // Devolver JSON de error para que el frontend pueda mostrarlo
                     string errorJson = JsonConvert.SerializeObject(new { error = ex.Message });
                     byte[] errBuf = Encoding.UTF8.GetBytes(errorJson);
                     ctx.Response.ContentType = "application/json; charset=utf-8";
@@ -314,6 +327,11 @@ namespace PrinterServices.Api.Controllers
                 ctx.Response.StatusCode = 200;
                 ctx.Response.Close();
             }
+            catch (HttpListenerException)
+            {
+                Log.Debug("[DASHBOARD] Cliente desconectado antes de completar respuesta (notifications)");
+                try { ctx.Response.Close(); } catch { }
+            }
             catch (Exception ex)
             {
                 Log.Error("[DASHBOARD] Error obteniendo historial de notificaciones: " + ex.Message, ex);
@@ -349,11 +367,15 @@ namespace PrinterServices.Api.Controllers
                 ctx.Response.StatusCode = 200;
                 ctx.Response.Close();
             }
+            catch (HttpListenerException)
+            {
+                Log.Debug("[DASHBOARD] Cliente desconectado antes de completar respuesta (data)");
+                try { ctx.Response.Close(); } catch { }
+            }
             catch (Exception ex)
             {
                 Log.Error("[DASHBOARD] Error obteniendo datos: " + ex.Message, ex);
-                ctx.Response.StatusCode = 500;
-                ctx.Response.Close();
+                try { ctx.Response.StatusCode = 500; ctx.Response.Close(); } catch { }
             }
         }
 
@@ -424,6 +446,11 @@ namespace PrinterServices.Api.Controllers
                 ctx.Response.OutputStream.Write(buffer, 0, buffer.Length);
                 ctx.Response.StatusCode = 200;
                 ctx.Response.Close();
+            }
+            catch (HttpListenerException)
+            {
+                Log.Debug("[DASHBOARD] Cliente desconectado antes de completar respuesta (network-history)");
+                try { ctx.Response.Close(); } catch { }
             }
             catch (Exception ex)
             {
@@ -517,6 +544,11 @@ namespace PrinterServices.Api.Controllers
                 ctx.Response.OutputStream.Write(buffer, 0, buffer.Length);
                 ctx.Response.StatusCode = 200;
                 ctx.Response.Close();
+            }
+            catch (HttpListenerException)
+            {
+                Log.Debug("[DASHBOARD] Cliente desconectado antes de completar respuesta (connectivity)");
+                try { ctx.Response.Close(); } catch { }
             }
             catch (Exception ex)
             {
@@ -667,9 +699,13 @@ namespace PrinterServices.Api.Controllers
                 })
                 .ToList();
 
+            // RAZÓN: Obtener versión del assembly para identificación en dashboard
+            var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+
             // RAZÓN: Construir response completo
             return new
             {
+                version = version != null ? version.ToString() : "desconocida",
                 timestamp = DateTime.Now.ToString("o"),
                 network = new
                 {

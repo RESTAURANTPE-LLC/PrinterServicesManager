@@ -205,6 +205,10 @@ namespace PrinterServices.Workers
 
         private async Task ProcessJobAsync(PrintJob job, CancellationToken ct)
         {
+            Log.InfoFormat("======[ JOB INICIO ]====== Job {0} → impresora={1} ip={2} estado={3} reintentos={4}/{5}",
+                job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, job.ImpresoraIp,
+                job.Estado, job.Reintentos, job.MaxReintentos);
+
             // ═══════════════════════════════════════════════════════════════════
             // Consultar impresora en BD UNA SOLA VEZ (tipo conexión + IP actualizada)
             // ═══════════════════════════════════════════════════════════════════
@@ -279,6 +283,24 @@ namespace PrinterServices.Workers
             var printerStatus = await Monitoring.PrinterStatusChecker.CheckAsync(
                 effectiveIp, port, connectTimeoutMs, ct);
 
+            // ======[ PRINTER_RESPONSE ]====== Guardar respuesta DLE EOT raw para diagnóstico
+            string printerResponseRaw = printerStatus.RawStatus ?? (printerStatus.Online ? "TCP_OK_NO_DLE" : "OFFLINE:" + (printerStatus.ErrorMessage ?? "sin respuesta"));
+            job.PrinterResponse = printerResponseRaw;
+            try
+            {
+                _db.Execute("UPDATE print_jobs SET printer_response = ? WHERE job_id = ?",
+                    printerResponseRaw, job.JobId);
+            }
+            catch (Exception ex)
+            {
+                Log.Debug("[WORKER] No se pudo guardar printer_response: " + ex.Message);
+            }
+
+            Log.InfoFormat("======[ PRE-CHECK ]====== Job {0} → {1} ({2}:{3}) | online={4} disponible={5} papel={6} tapa={7} raw={8}",
+                job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, effectiveIp, port,
+                printerStatus.Online, printerStatus.DisponibleParaImprimir,
+                printerStatus.TienePapel, printerStatus.TapaAbierta, printerResponseRaw);
+
             if (!printerStatus.Online)
             {
                 // RAZÓN: Si la impresora no es alcanzable Y la red cambió, enriquecer el mensaje
@@ -287,9 +309,9 @@ namespace PrinterServices.Workers
                     ? "Impresora offline (posible causa: cambio de red detectado). Verifique que esté en la red correcta."
                     : "Impresora offline: " + (printerStatus.ErrorMessage ?? "sin conexión");
 
-                Log.WarnFormat("[WORKER] Job {0} — impresora {1} ({2}) OFFLINE{3}, moviendo a WAITING",
-                    job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, job.ImpresoraIp,
-                    networkChanged ? " [RED CAMBIADA]" : "");
+                Log.WarnFormat("======[ OFFLINE ]====== Job {0} → {1} ({2}) raw={3} error={4}",
+                    job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, effectiveIp,
+                    printerResponseRaw, printerStatus.ErrorMessage ?? "sin conexión");
 
                 _jobManager.MarkWaiting(job, offlineReason);
                 LogPrint(job, "WAITING", networkChanged ? "Impresora offline + red cambiada" : "Impresora offline");
@@ -305,8 +327,8 @@ namespace PrinterServices.Workers
             if (!printerStatus.TienePapel)
             {
                 // RAZÓN: Sin papel es un ERROR, no espera. El Front debe mostrar el modal de fallo con el motivo.
-                Log.WarnFormat("[WORKER] Job {0} — impresora {1} SIN PAPEL, marcando FAILED",
-                    job.JobId, job.ImpresoraNombre ?? job.ImpresoraId);
+                Log.WarnFormat("======[ SIN PAPEL ]====== Job {0} → {1} ({2}) raw={3}",
+                    job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, effectiveIp, printerResponseRaw);
 
                 _jobManager.MarkFailed(job, "Sin papel");                          // Marcar como FAILED con motivo
                 LogPrint(job, "FAILED", "Sin papel");                              // Log con estado FAILED
@@ -325,8 +347,8 @@ namespace PrinterServices.Workers
             // Es un ERROR, no espera: el Front debe mostrar el modal de fallo con el motivo.
             if (printerStatus.TapaAbierta)
             {
-                Log.WarnFormat("[WORKER] Job {0} — impresora {1} TAPA ABIERTA, marcando FAILED",
-                    job.JobId, job.ImpresoraNombre ?? job.ImpresoraId);
+                Log.WarnFormat("======[ TAPA ABIERTA ]====== Job {0} → {1} ({2}) raw={3}",
+                    job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, effectiveIp, printerResponseRaw);
 
                 _jobManager.MarkFailed(job, "Tapa abierta");                       // Marcar como FAILED con motivo
                 LogPrint(job, "FAILED", "Tapa abierta");                           // Log con estado FAILED
@@ -340,8 +362,10 @@ namespace PrinterServices.Workers
                 return;
             }
 
+            Log.InfoFormat("======[ PRE-CHECK OK ]====== Job {0} → IMPRIMIENDO en {1} ({2}:{3}) raw={4}",
+                job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, effectiveIp, port, printerResponseRaw);
+
             IPrinterDriver driver = DriverFactory.GetDriver(job.PrinterModel);
-            Log.DebugFormat("[WORKER] Driver seleccionado: {0} para modelo {1}", driver.ModelName, job.PrinterModel ?? "null");
 
             // Construir payload ESC/POS
             byte[] payload = BuildPayload(driver, job);
@@ -388,6 +412,8 @@ namespace PrinterServices.Workers
             string pedidoInfo = job.PedidoIds != null && job.PedidoIds.Count > 0
                 ? " [pedidos: " + string.Join(",", job.PedidoIds) + "]"
                 : "";
+            Log.InfoFormat("======[ DONE ]====== Job {0} → {1} ({2}) raw={3}",
+                job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, effectiveIp, printerResponseRaw);
             LogPrint(job, "DONE", "Impresión completada" + pedidoInfo);
             // Notificar éxito via gRPC → servidores + cliente origen
             NotifyIfAvailable(n => n.NotifyPrintSuccess(

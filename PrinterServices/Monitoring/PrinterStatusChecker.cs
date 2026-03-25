@@ -93,6 +93,33 @@ namespace PrinterServices.Monitoring
                 // Bits 5,6: 00=paper present, other=no paper
                 status.TienePapel = (paperByte & 0x60) == 0;
 
+                // ======[ DLE VALIDATION ]====== Validar respuesta DLE EOT.
+                // Según especificación ESC/POS, respuestas válidas tienen bits 1 y 4 en 1 (0x12).
+                // TM-T20IIIL con tapa abierta retorna 0x00 en todos los bytes (no responde DLE EOT).
+                // Validación estricta: si TODOS son 0x00 → inválido (no importa bits individuales)
+                bool todosEnCero = printerByte == 0x00 && offlineByte == 0x00 && errorByte == 0x00 && paperByte == 0x00;
+                bool dleResponseValid = !todosEnCero
+                                     && ((printerByte & 0x12) == 0x12
+                                      || (offlineByte & 0x12) == 0x12
+                                      || (errorByte & 0x12) == 0x12
+                                      || (paperByte & 0x12) == 0x12);
+
+                if (!dleResponseValid)
+                {
+                    status.DisponibleParaImprimir = false;
+                    status.TapaAbierta = true;
+                    status.ErrorRecuperable = true;
+                    status.ErrorMessage = "DLE EOT sin respuesta válida (posible tapa abierta o error hardware)";
+
+                    status.RawStatus = string.Format("P:{0:X2} O:{1:X2} E:{2:X2} S:{3:X2}",
+                        printerByte, offlineByte, errorByte, paperByte);
+
+                    Log.WarnFormat("======[ DLE INVALIDO ]====== {0}:{1} raw={2} — marcando NO disponible",
+                        ip, port, status.RawStatus);
+
+                    return status;
+                }
+
                 // Calcular disponibilidad: todas las condiciones deben ser OK
                 status.DisponibleParaImprimir = printerReady && !status.TapaAbierta && status.TienePapel;
 
@@ -100,7 +127,7 @@ namespace PrinterServices.Monitoring
                     printerByte, offlineByte, errorByte, paperByte);
 
                 Log.DebugFormat("[STATUS] {0}:{1} → online={2} disponible={3} papel={4} tapa={5} raw={6}",
-                    ip, port, status.Online, status.DisponibleParaImprimir, 
+                    ip, port, status.Online, status.DisponibleParaImprimir,
                     status.TienePapel, status.TapaAbierta, status.RawStatus);
 
                 return status;
@@ -183,6 +210,24 @@ namespace PrinterServices.Monitoring
                 byte paperByte = SendAndReceiveByteSync(socket, DLE_EOT_PAPER, timeoutMs);
                 status.TienePapel = (paperByte & 0x60) == 0;
 
+                // ======[ DLE VALIDATION ]====== Validar respuesta DLE EOT (CheckSync)
+                bool dleResponseValid = (printerByte & 0x12) == 0x12
+                                     || (offlineByte & 0x12) == 0x12
+                                     || (errorByte & 0x12) == 0x12
+                                     || (paperByte & 0x12) == 0x12;
+
+                if (!dleResponseValid)
+                {
+                    status.DisponibleParaImprimir = false;
+                    status.TapaAbierta = true;
+                    status.ErrorRecuperable = true;
+                    status.ErrorMessage = "DLE EOT sin respuesta válida (posible tapa abierta o error hardware)";
+                    status.RawStatus = string.Format("P:{0:X2} O:{1:X2} E:{2:X2} S:{3:X2}",
+                        printerByte, offlineByte, errorByte, paperByte);
+                    Log.WarnFormat("======[ DLE INVALIDO ]====== {0}:{1} raw={2}", ip, port, status.RawStatus);
+                    return status;
+                }
+
                 // Calcular disponibilidad: todas las condiciones deben ser OK
                 status.DisponibleParaImprimir = printerReady && !status.TapaAbierta && status.TienePapel;
 
@@ -218,7 +263,17 @@ namespace PrinterServices.Monitoring
 
         private static byte SendAndReceiveByteSync(Socket socket, byte[] command, int timeoutMs)
         {
+            // Limpiar buffer de recepción antes de enviar (evitar datos residuales de comandos previos)
+            while (socket.Available > 0)
+            {
+                var trash = new byte[socket.Available];
+                socket.Receive(trash, 0, trash.Length, SocketFlags.None);
+            }
+
             socket.Send(command, 0, command.Length, SocketFlags.None);
+
+            // Esperar respuesta con timeout — microDelay para que la impresora procese
+            Thread.Sleep(50);
 
             if (!socket.Poll(timeoutMs * 1000, SelectMode.SelectRead))
             {
