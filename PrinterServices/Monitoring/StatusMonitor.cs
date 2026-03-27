@@ -146,7 +146,7 @@ namespace PrinterServices.Monitoring
 
                 try
                 {
-                    int intervalSeconds = ConfigManager.Instance.GetInt("StatusCheckIntervalSeconds", 15);
+                    int intervalSeconds = ConfigManager.Instance.GetInt("StatusCheckIntervalSeconds", 2);
                     // RAZÓN: Esperar el intervalo normal O hasta que alguien llame TriggerImmediateCheck().
                     // WhenAny garantiza que si la red vuelve, no esperamos los 3s completos.
                     var delayTask = Task.Delay(intervalSeconds * 1000, ct);
@@ -547,14 +547,14 @@ namespace PrinterServices.Monitoring
                     // TRANSICIÓN 4: Dejó de estar disponible (online pero con problema)
                     else if (status.Online && wasDisponible && !status.DisponibleParaImprimir)
                     {
-                        string razon = status.TapaAbierta ? "tapa abierta" : 
+                        string razon = status.TapaAbierta ? "tapa abierta" :
                                        !status.TienePapel ? "sin papel" : "no lista";
                         Log.WarnFormat("[MONITOR] ⚠ {0} ({1}) NO DISPONIBLE — {2}",
                             printer.Nombre ?? printer.ImpresoraId, printer.Ip, razon);
-                        
+
                         // Registrar transición en printer_status_log
                         LogStatusTransition(printer, "DISPONIBLE", "NO_DISPONIBLE", razon);
-                        
+
                         if (!status.TienePapel)
                         {
                             NotifyPrinterChange(printer.ImpresoraId, printer.Nombre,
@@ -565,6 +565,16 @@ namespace PrinterServices.Monitoring
                             NotifyPrinterChange(printer.ImpresoraId, printer.Nombre,
                                 NotificationType.Offline, "Tapa abierta");
                         }
+                    }
+                    // ======[ ARP PERSISTENTE ]====== Impresora SIGUE offline (no es transición, ya estaba offline)
+                    // RAZÓN: Si la impresora cambió de IP por DHCP y el servicio arrancó después,
+                    // wasOnline=false siempre, la transición ONLINE→OFFLINE nunca se dispara
+                    // y el ARP scan nunca se ejecuta. Este bloque lo resuelve.
+                    else if (!wasOnline && !status.Online && !isUsbPrinter
+                             && !string.IsNullOrEmpty(printer.MacAddress))
+                    {
+                        // Solo encolar si NO hay un scan activo ya (EnqueueScan lo verifica internamente)
+                        _arpWorker?.EnqueueScan(printer.ImpresoraId);
                     }
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -602,20 +612,30 @@ namespace PrinterServices.Monitoring
                 int requeuedCount = 0;  // Contador de jobs re-encolados
                 int expiredCount = 0;   // Contador de jobs expirados
 
+                int skippedCount = 0; // Contador de jobs omitidos por estado terminal en RAM
+
                 foreach (var entity in waitingJobs)
                 {
                     var job = PrintJob.FromEntity(entity);
 
+                    // Guard: Verificar estado real en RAM antes de operar sobre dato de BD (stale)
+                    var ramState = _jobManager.GetStateInMemory(job.JobId);
+                    if (ramState.HasValue && PrintJobManager.IsTerminalState(ramState.Value))
+                    {
+                        skippedCount++;
+                        continue; // Job ya es DONE/FAILED/EXPIRED en RAM — BD retornó dato stale
+                    }
+
                     // Fase 23: Verificar si el job superó el tiempo máximo en WAITING
                     if (expirarDespuesDe > 0 && IsJobExpired(job, expirarDespuesDe))
                     {
-                        ExpireJob(job, expirarDespuesDe); // Marcar como expirado + notificar
-                        expiredCount++;                    // Incrementar contador de expirados
+                        ExpireJob(job, expirarDespuesDe);
+                        expiredCount++;
                     }
                     else
                     {
-                        _jobManager.ReEnqueue(job);        // Re-encolar normalmente
-                        requeuedCount++;                   // Incrementar contador de re-encolados
+                        if (_jobManager.ReEnqueue(job))    // Guard: ReEnqueue valida atómicamente
+                            requeuedCount++;
                     }
                 }
 

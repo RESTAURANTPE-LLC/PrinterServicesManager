@@ -34,7 +34,7 @@ namespace PrinterServices
         public void Start()
         {
             Log.Info("═══════════════════════════════════════════════");
-            Log.Info("  PrinterServices v1.0 — Iniciando...");
+            Log.InfoFormat("  PrinterServices v{0} — Iniciando...", Core.ServiceVersion.FullVersion);
             Log.Info("═══════════════════════════════════════════════");
 
             try

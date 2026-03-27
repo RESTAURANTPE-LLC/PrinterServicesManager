@@ -19,6 +19,12 @@ namespace PrinterServices.Queue
         private readonly PrinterServiceDb _db;
         private readonly object _statsLock = new object();
 
+        // ── Guard: Estado en RAM como fuente de verdad (thread-safe) ──
+        private readonly ConcurrentDictionary<string, PrintJobStatus> _jobStates
+            = new ConcurrentDictionary<string, PrintJobStatus>();
+        private readonly ConcurrentDictionary<string, object> _jobLocks
+            = new ConcurrentDictionary<string, object>();
+
         private int _totalEnqueued;
         private int _totalProcessed;
 
@@ -31,6 +37,146 @@ namespace PrinterServices.Queue
             _db = db;
             _queue = new ConcurrentQueue<PrintJob>();
             _signal = new SemaphoreSlim(0);
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // Guard: Transiciones atómicas de estado
+        // ═══════════════════════════════════════════════════════════════
+
+        /// <summary>Verifica si un estado es terminal (DONE, FAILED, EXPIRED) — inmutable.</summary>
+        public static bool IsTerminalState(PrintJobStatus status)
+        {
+            return status == PrintJobStatus.Done || status == PrintJobStatus.Failed || status == PrintJobStatus.Expired;
+        }
+
+        /// <summary>Consulta estado real en RAM. Retorna null si el job no existe.</summary>
+        public PrintJobStatus? GetStateInMemory(string jobId)
+        {
+            PrintJobStatus state;
+            return _jobStates.TryGetValue(jobId, out state) ? state : (PrintJobStatus?)null;
+        }
+
+        /// <summary>
+        /// Transición atómica de estado con lock por job.
+        /// Estados terminales (DONE, FAILED, EXPIRED) NUNCA cambian.
+        /// </summary>
+        public bool TryChangeState(string jobId, PrintJobStatus? expectedState, PrintJobStatus newState)
+        {
+            var jobLock = _jobLocks.GetOrAdd(jobId, _ => new object());
+            lock (jobLock)
+            {
+                PrintJobStatus currentState;
+                if (!_jobStates.TryGetValue(jobId, out currentState))
+                    return false; // Job no existe en RAM
+
+                // Estados terminales son inmutables
+                if (IsTerminalState(currentState))
+                {
+                    Log.WarnFormat("[GUARD] Job {0} en estado terminal {1} — transición a {2} RECHAZADA",
+                        jobId, currentState, newState);
+                    return false;
+                }
+
+                // Validar estado esperado si se especificó
+                if (expectedState.HasValue && currentState != expectedState.Value)
+                {
+                    Log.WarnFormat("[GUARD] Job {0} estado actual={1}, esperado={2} — transición a {3} RECHAZADA",
+                        jobId, currentState, expectedState.Value, newState);
+                    return false;
+                }
+
+                _jobStates[jobId] = newState;
+                return true;
+            }
+        }
+
+        /// <summary>Transición atómica: PENDING → PRINTING. Retorna false si ya no es PENDING.</summary>
+        public bool MarkPrinting(PrintJob job)
+        {
+            if (!TryChangeState(job.JobId, PrintJobStatus.Pending, PrintJobStatus.Printing))
+                return false;
+
+            job.Estado = PrintJobStatus.Printing;
+            UpdateJobInDb(job);
+            return true;
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // Guard: Hash anti-duplicación
+        // ═══════════════════════════════════════════════════════════════
+
+        /// <summary>SHA256 del contenido completo del job para detección de duplicados.</summary>
+        public static string CalculateContentHash(PrintJob job)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append(job.Contenido ?? "");
+            sb.Append(job.ContenidoHtml ?? "");
+            sb.Append(job.ImpresoraId ?? "");
+            sb.Append(job.ComandaId ?? "");
+            sb.Append(job.PedidoIds != null ? string.Join(",", job.PedidoIds) : "");
+            sb.Append(job.LineasImprimirJson ?? "");
+            sb.Append(job.DocumentoJson ?? "");
+
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+            {
+                var bytes = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
+                var hash = sha.ComputeHash(bytes);
+                return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+            }
+        }
+
+        /// <summary>Registra hash ANTES de enviar bytes a impresora. INSERT OR REPLACE.</summary>
+        public void RegisterPrintHash(PrintJob job, string hash)
+        {
+            try
+            {
+                var entity = new PrintedJobHashEntity
+                {
+                    JobId = job.JobId,
+                    ImpresoraId = job.ImpresoraId ?? "",
+                    ContenidoHash = hash,
+                    FechaImpresion = DateTime.Now.ToString("o"),
+                    ImpresoraNombre = job.ImpresoraNombre,
+                    AreaImpresion = job.AreaImpresion,
+                    TipoImpresion = job.TipoImpresion,
+                    PedidoIds = job.PedidoIds != null ? string.Join(",", job.PedidoIds) : null,
+                    ComandaId = job.ComandaId
+                };
+                _db.InsertOrReplace(entity);
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[GUARD] Error registrando hash para job " + job.JobId + ": " + ex.Message);
+            }
+        }
+
+        /// <summary>¿Este job ya fue impreso físicamente? Consulta por job_id en printed_jobs_hash.</summary>
+        public bool IsAlreadyPrinted(string jobId)
+        {
+            try
+            {
+                var count = _db.ExecuteScalar<int>(
+                    "SELECT COUNT(*) FROM printed_jobs_hash WHERE job_id = ?", jobId);
+                return count > 0;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Purga hashes con más de 24h. Llamar periódicamente desde ExpirationLoop.</summary>
+        public void PurgeOldHashes()
+        {
+            try
+            {
+                int deleted = _db.Execute(
+                    "DELETE FROM printed_jobs_hash WHERE fecha_impresion < ?",
+                    DateTime.Now.AddHours(-24).ToString("o"));
+                if (deleted > 0)
+                    Log.InfoFormat("[GUARD] Purgados {0} hashes antiguos (>24h)", deleted);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("[GUARD] Error purgando hashes: " + ex.Message);
+            }
         }
 
         public string Enqueue(PrintJob job)
@@ -48,6 +194,9 @@ namespace PrinterServices.Queue
             {
                 Log.Error("[QUEUE] Error al persistir job en SQLite: " + ex.Message, ex);
             }
+
+            // Guard: Registrar estado en RAM (fuente de verdad)
+            _jobStates[job.JobId] = job.Estado;
 
             _queue.Enqueue(job);
             Interlocked.Increment(ref _totalEnqueued);
@@ -77,38 +226,24 @@ namespace PrinterServices.Queue
         {
             if (job == null) return;
 
-            string estadoPrevio = job.Estado.ToString().ToUpper();         // Guardar estado previo para print_log
+            // Guard: No reintentar estados terminales (usar RetryManual para eso)
+            var ramState = GetStateInMemory(job.JobId);
+            if (ramState.HasValue && IsTerminalState(ramState.Value))
+            {
+                Log.WarnFormat("[GUARD] Job {0} en estado terminal {1} — Retry automático rechazado", job.JobId, ramState.Value);
+                return;
+            }
+
+            string estadoPrevio = job.Estado.ToString().ToUpper();
+            _jobStates[job.JobId] = PrintJobStatus.Pending;
+
             job.Reintentos++;
             job.Estado = PrintJobStatus.Pending;
             job.ErrorMensaje = null;
-            job.FechaCreacion = DateTime.Now;                              // Resetear fecha para que ExpirationLoop
-                                                                           // no lo expire inmediatamente si era EXPIRED
+            job.FechaCreacion = DateTime.Now;
 
             UpdateJobInDb(job);
-
-            // Registrar en print_log: evidencia de que un job EXPIRED/FAILED fue reenviado
-            // Así queda: ... → EXPIRED (con hora original) → RETRIED (con hora nueva) → DONE/FAILED
-            try
-            {
-                var logEntry = new Data.Models.PrintLogEntity
-                {
-                    JobId = job.JobId,
-                    ImpresoraId = job.ImpresoraId,
-                    ImpresoraNombre = job.ImpresoraNombre,
-                    ImpresoraIp = job.ImpresoraIp,
-                    Estado = "RETRIED",                                    // Estado descriptivo para el log
-                    Mensaje = string.Format("Reenviado desde estado {0} (reintento #{1})", estadoPrevio, job.Reintentos),
-                    Reintentos = job.Reintentos,
-                    Fecha = DateTime.Now.ToString("o"),
-                    DeviceIdOrigen = job.DeviceIdOrigen,
-                    AreaImpresion = job.AreaImpresion
-                };
-                _db.Insert(logEntry);
-            }
-            catch (Exception ex)
-            {
-                Log.Warn("[QUEUE] Error al registrar log de retry: " + ex.Message); // No fatal
-            }
+            LogRetry(job, estadoPrevio);
 
             _queue.Enqueue(job);
             _signal.Release();
@@ -117,52 +252,86 @@ namespace PrinterServices.Queue
                 job.JobId, estadoPrevio, job.Reintentos, job.MaxReintentos);
         }
 
-        public void MarkDone(PrintJob job)
+        public bool MarkDone(PrintJob job)
         {
+            // Guard: Transición atómica PRINTING → DONE
+            if (!TryChangeState(job.JobId, PrintJobStatus.Printing, PrintJobStatus.Done))
+            {
+                // Forzar si no existía en RAM (job recuperado de BD)
+                _jobStates[job.JobId] = PrintJobStatus.Done;
+            }
+
             job.Estado = PrintJobStatus.Done;
             job.FechaImpresion = DateTime.Now;
             UpdateJobInDb(job);
 
             Log.InfoFormat("[QUEUE] Job {0} completado → impresora={1}",
                 job.JobId, job.ImpresoraNombre ?? job.ImpresoraId);
+            return true;
         }
 
-        public void MarkFailed(PrintJob job, string error)
+        public bool MarkFailed(PrintJob job, string error)
         {
+            // Guard: No cambiar estados terminales
+            var ramState = GetStateInMemory(job.JobId);
+            if (ramState.HasValue && IsTerminalState(ramState.Value))
+            {
+                Log.WarnFormat("[GUARD] Job {0} ya es {1} — MarkFailed rechazado", job.JobId, ramState.Value);
+                return false;
+            }
+            _jobStates[job.JobId] = PrintJobStatus.Failed;
+
             job.Estado = PrintJobStatus.Failed;
             job.ErrorMensaje = error;
             UpdateJobInDb(job);
 
             Log.WarnFormat("[QUEUE] Job {0} FALLIDO → {1}", job.JobId, error);
+            return true;
         }
 
-        public void MarkWaiting(PrintJob job, string reason)
+        public bool MarkWaiting(PrintJob job, string reason)
         {
+            var ramState = GetStateInMemory(job.JobId);
+            if (ramState.HasValue && IsTerminalState(ramState.Value))
+            {
+                Log.WarnFormat("[GUARD] Job {0} ya es {1} — MarkWaiting rechazado", job.JobId, ramState.Value);
+                return false;
+            }
+            _jobStates[job.JobId] = PrintJobStatus.Waiting;
+
             job.Estado = PrintJobStatus.Waiting;
             job.ErrorMensaje = reason;
             UpdateJobInDb(job);
 
             Log.InfoFormat("[QUEUE] Job {0} en ESPERA → {1}", job.JobId, reason);
+            return true;
         }
 
-        /// <summary>
-        /// Fase 23: Marca un job como EXPIRED (superó tiempo máximo en WAITING).
-        /// Es un estado terminal — el job NO se reintenta ni se re-encola.
-        /// </summary>
-        /// <param name="job">Job a marcar como expirado</param>
-        /// <param name="reason">Motivo de expiración (ej: "Superó 300 segundos en WAITING")</param>
-        public void MarkExpired(PrintJob job, string reason)
+        public bool MarkExpired(PrintJob job, string reason)
         {
-            job.Estado = PrintJobStatus.Expired;   // Estado terminal: no se reintenta
-            job.ErrorMensaje = reason;              // Guardar motivo de expiración
-            UpdateJobInDb(job);                     // Persistir en BD
+            if (!TryChangeState(job.JobId, PrintJobStatus.Waiting, PrintJobStatus.Expired))
+            {
+                Log.WarnFormat("[GUARD] Job {0} no está WAITING — MarkExpired rechazado", job.JobId);
+                return false;
+            }
 
-            Log.WarnFormat("[QUEUE] Job {0} EXPIRADO → {1}", job.JobId, reason); // Log de advertencia
+            job.Estado = PrintJobStatus.Expired;
+            job.ErrorMensaje = reason;
+            UpdateJobInDb(job);
+
+            Log.WarnFormat("[QUEUE] Job {0} EXPIRADO → {1}", job.JobId, reason);
+            return true;
         }
 
-        public void ReEnqueue(PrintJob job)
+        public bool ReEnqueue(PrintJob job)
         {
-            if (job == null) return;
+            if (job == null) return false;
+
+            if (!TryChangeState(job.JobId, PrintJobStatus.Waiting, PrintJobStatus.Pending))
+            {
+                Log.WarnFormat("[GUARD] Job {0} no está WAITING — ReEnqueue rechazado", job.JobId);
+                return false;
+            }
 
             job.Estado = PrintJobStatus.Pending;
             job.ErrorMensaje = null;
@@ -173,14 +342,16 @@ namespace PrinterServices.Queue
 
             Log.InfoFormat("[QUEUE] Job {0} re-encolado desde WAITING → impresora={1}",
                 job.JobId, job.ImpresoraNombre ?? job.ImpresoraId);
+            return true;
         }
 
         public void RecoverPending()
         {
             try
             {
+                // Guard: Recuperar PENDING + WAITING + PRINTING (PRINTING = posible crash post-impresión)
                 var pending = _db.Query<PrintJobEntity>(
-                    "SELECT * FROM print_jobs WHERE estado IN ('PENDING','WAITING') ORDER BY prioridad ASC, fecha_creacion ASC");
+                    "SELECT * FROM print_jobs WHERE estado IN ('PENDING','WAITING','PRINTING') ORDER BY prioridad ASC, fecha_creacion ASC");
 
                 if (pending == null || pending.Count == 0)
                 {
@@ -188,18 +359,112 @@ namespace PrinterServices.Queue
                     return;
                 }
 
+                int recovered = 0;
+                int skippedByHash = 0;
+
                 foreach (var entity in pending)
                 {
                     var job = PrintJob.FromEntity(entity);
+
+                    // Guard: Verificar si este job ya fue impreso (hash anti-duplicación)
+                    if (IsAlreadyPrinted(job.JobId))
+                    {
+                        // Ya impreso — marcar DONE sin reimprimir
+                        job.Estado = PrintJobStatus.Done;
+                        job.FechaImpresion = DateTime.Now;
+                        UpdateJobInDb(job);
+                        _jobStates[job.JobId] = PrintJobStatus.Done;
+                        skippedByHash++;
+                        Log.InfoFormat("[GUARD] Job {0} ya impreso (hash encontrado) — marcado DONE sin reimprimir", job.JobId);
+                        continue;
+                    }
+
+                    // Si estaba PRINTING → volver a PENDING (no sabemos si se imprimió)
+                    if (entity.Estado == "PRINTING")
+                    {
+                        job.Estado = PrintJobStatus.Pending;
+                        UpdateJobInDb(job);
+                    }
+
+                    // Registrar en RAM y encolar
+                    _jobStates[job.JobId] = job.Estado;
                     _queue.Enqueue(job);
                     _signal.Release();
+                    recovered++;
                 }
 
-                Log.InfoFormat("[QUEUE] Recuperados {0} jobs pendientes de SQLite", pending.Count);
+                Log.InfoFormat("[QUEUE] Recuperados {0} jobs, {1} omitidos por hash anti-duplicación", recovered, skippedByHash);
             }
             catch (Exception ex)
             {
                 Log.Error("[QUEUE] Error al recuperar jobs pendientes: " + ex.Message, ex);
+            }
+        }
+
+        /// <summary>
+        /// Retry manual desde API/dashboard. Permite salir de FAILED/EXPIRED (no de DONE).
+        /// Elimina hash previo para permitir reimpresión.
+        /// </summary>
+        public void RetryManual(PrintJob job)
+        {
+            if (job == null) return;
+
+            // DONE nunca se reintenta — ya se imprimió exitosamente
+            var ramState = GetStateInMemory(job.JobId);
+            if (ramState.HasValue && ramState.Value == PrintJobStatus.Done)
+            {
+                Log.WarnFormat("[GUARD] Job {0} está DONE — RetryManual rechazado", job.JobId);
+                return;
+            }
+
+            // Eliminar hash previo para permitir reimpresión
+            try
+            {
+                _db.Execute("DELETE FROM printed_jobs_hash WHERE job_id = ?", job.JobId);
+            }
+            catch { }
+
+            // Forzar transición en RAM (bypass de TryChangeState para estados terminales)
+            _jobStates[job.JobId] = PrintJobStatus.Pending;
+
+            string estadoPrevio = job.Estado.ToString().ToUpper();
+            job.Reintentos++;
+            job.Estado = PrintJobStatus.Pending;
+            job.ErrorMensaje = null;
+            job.FechaCreacion = DateTime.Now;
+
+            UpdateJobInDb(job);
+            LogRetry(job, estadoPrevio);
+
+            _queue.Enqueue(job);
+            _signal.Release();
+
+            Log.InfoFormat("[QUEUE] Job {0} RetryManual desde {1} (reintento {2}/{3})",
+                job.JobId, estadoPrevio, job.Reintentos, job.MaxReintentos);
+        }
+
+        private void LogRetry(PrintJob job, string estadoPrevio)
+        {
+            try
+            {
+                var logEntry = new PrintLogEntity
+                {
+                    JobId = job.JobId,
+                    ImpresoraId = job.ImpresoraId,
+                    ImpresoraNombre = job.ImpresoraNombre,
+                    ImpresoraIp = job.ImpresoraIp,
+                    Estado = "RETRIED",
+                    Mensaje = string.Format("Reenviado desde estado {0} (reintento #{1})", estadoPrevio, job.Reintentos),
+                    Reintentos = job.Reintentos,
+                    Fecha = DateTime.Now.ToString("o"),
+                    DeviceIdOrigen = job.DeviceIdOrigen,
+                    AreaImpresion = job.AreaImpresion
+                };
+                _db.Insert(logEntry);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("[QUEUE] Error al registrar log de retry: " + ex.Message);
             }
         }
 

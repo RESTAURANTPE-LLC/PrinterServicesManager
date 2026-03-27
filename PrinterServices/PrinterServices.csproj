@@ -80,6 +80,8 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Core\Network\ServiceVersion.cs" />
+    <Compile Include="Data\Models\PrintedJobHashEntity.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="PrinterServicesHost.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />

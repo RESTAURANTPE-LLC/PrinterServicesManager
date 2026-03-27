@@ -70,6 +70,15 @@ namespace PrinterServices.Data
             // Tabla de log de transiciones de estado de impresoras (ONLINE/OFFLINE)
             CreateTable<Models.PrinterStatusLogEntity>();
 
+            // Anti-Duplicación: Hash de trabajos REALMENTE impresos físicamente
+            CreateTable<Models.PrintedJobHashEntity>();
+            try
+            {
+                Execute("CREATE INDEX IF NOT EXISTS idx_printed_hash ON printed_jobs_hash(contenido_hash)");
+                Execute("CREATE INDEX IF NOT EXISTS idx_printed_impresora ON printed_jobs_hash(impresora_id, fecha_impresion)");
+            }
+            catch { }
+
             // Fase 8: Tablas de monitoreo de red y latencias
             CreateTable<Models.NetworkSnapshotEntity>();
             CreateTable<Models.NetworkCurrentEntity>();
@@ -246,6 +255,38 @@ namespace PrinterServices.Data
             catch (Exception ex)
             {
                 Log.Warn("[DB] Error en migración printer_response: " + ex.Message);
+            }
+
+            // Migración: agregar columnas del diseñador de comandas a print_jobs
+            try
+            {
+                var disCols = Query<dynamic>("PRAGMA table_info(print_jobs)");
+                bool hasUtilizarDisenador = false;
+                bool hasDocumentoJson = false;
+                foreach (var col in disCols)
+                {
+                    var colDict = col as System.Collections.Generic.IDictionary<string, object>;
+                    if (colDict != null && colDict.ContainsKey("name"))
+                    {
+                        string colName = colDict["name"].ToString();
+                        if (colName == "utilizar_disenador_comandas") hasUtilizarDisenador = true;
+                        else if (colName == "documento_json") hasDocumentoJson = true;
+                    }
+                }
+                if (!hasUtilizarDisenador)
+                {
+                    Execute("ALTER TABLE print_jobs ADD COLUMN utilizar_disenador_comandas INTEGER DEFAULT 0");
+                    Log.Info("[DB] Columna 'utilizar_disenador_comandas' agregada a tabla print_jobs");
+                }
+                if (!hasDocumentoJson)
+                {
+                    Execute("ALTER TABLE print_jobs ADD COLUMN documento_json TEXT");
+                    Log.Info("[DB] Columna 'documento_json' agregada a tabla print_jobs");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("[DB] Error en migración diseñador comandas (print_jobs): " + ex.Message);
             }
 
             // Crear índices adicionales

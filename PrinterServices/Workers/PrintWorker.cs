@@ -77,7 +77,13 @@ namespace PrinterServices.Workers
                     job = await _jobManager.DequeueAsync(ct);
                     if (job == null) continue;
 
-                    job.Estado = PrintJobStatus.Printing;
+                    // Guard: Transición atómica PENDING → PRINTING
+                    if (!_jobManager.MarkPrinting(job))
+                    {
+                        Log.WarnFormat("[WORKER] Job {0} omitido — no está PENDING (otro thread cambió estado)", job.JobId);
+                        continue;
+                    }
+
                     Log.InfoFormat("[WORKER] Procesando job {0} → {1} ({2})",
                         job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, job.ImpresoraIp);
 
@@ -132,15 +138,22 @@ namespace PrinterServices.Workers
                         {
                             var job = PrintJob.FromEntity(entity);         // Convertir entidad a PrintJob
 
+                            // Guard: Verificar estado real en RAM antes de operar sobre dato de BD (stale)
+                            var ramState = _jobManager.GetStateInMemory(job.JobId);
+                            if (ramState.HasValue && PrintJobManager.IsTerminalState(ramState.Value))
+                            {
+                                continue; // Ya es DONE/FAILED/EXPIRED en RAM — BD está stale
+                            }
+
                             // PRIORIDAD 1: Si la impresora volvió online y disponible → re-encolar
-                            // RAZÓN: La desconexión pudo ser breve (entre ciclos de StatusMonitor)
-                            // y StatusMonitor no detectó la transición OFFLINE→ONLINE.
                             if (IsPrinterAvailableInDb(job.ImpresoraId))
                             {
-                                _jobManager.ReEnqueue(job);
-                                LogPrint(job, "RE-ENQUEUED", "Impresora volvió online - reintentando impresión");
-                                requeuedCount++;
-                                continue;                                  // No evaluar expiración
+                                if (_jobManager.ReEnqueue(job))
+                                {
+                                    LogPrint(job, "RE-ENQUEUED", "Impresora volvió online - reintentando impresión");
+                                    requeuedCount++;
+                                }
+                                continue;
                             }
 
                             // PRIORIDAD 2: Impresora sigue offline → verificar expiración
@@ -148,9 +161,8 @@ namespace PrinterServices.Workers
                             {
                                 double segundosTranscurridos = (DateTime.Now - job.FechaCreacion).TotalSeconds;
 
-                                if (segundosTranscurridos > expirarDespuesDe) // Superó el tiempo configurado
+                                if (segundosTranscurridos > expirarDespuesDe)
                                 {
-                                    // Construir mensaje descriptivo con tiempo real vs configurado
                                     string expiredReason = string.Format(
                                         "Tiempo de impresión expirado ({0}s de {1}s permitidos). Impresora offline.",
                                         (int)segundosTranscurridos, expirarDespuesDe);
@@ -159,18 +171,19 @@ namespace PrinterServices.Workers
                                         job.JobId, job.ImpresoraNombre ?? job.ImpresoraId,
                                         (int)segundosTranscurridos, expirarDespuesDe);
 
-                                    _jobManager.MarkExpired(job, expiredReason);  // Marcar EXPIRED en BD
-                                    LogPrint(job, "EXPIRED", expiredReason);       // Registrar en print_log (evidencia)
-                                    // Notificar EXPIRED via gRPC → servidores + cliente origen
+                                    _jobManager.MarkExpired(job, expiredReason);
+                                    LogPrint(job, "EXPIRED", expiredReason);
                                     NotifyIfAvailable(n => n.NotifyPrintExpired(
                                         job.JobId, job.ComandaId, job.ImpresoraId,
                                         job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen, expiredReason));
-                                    // Callback HTTP a QuipuNetX → EXPIRED + motivo (fire-and-forget)
                                     _callbackNotifier.NotifyStatusChangeFireAndForget(job, "EXPIRED", expiredReason);
-                                    expiredCount++;                        // Incrementar contador
+                                    expiredCount++;
                                 }
                             }
                         }
+
+                        // Guard: Purga periódica de hashes antiguos (>24h)
+                        _jobManager.PurgeOldHashes();
 
                         if (requeuedCount > 0)                             // Loguear si hubo re-encolados
                         {
@@ -208,6 +221,16 @@ namespace PrinterServices.Workers
             Log.InfoFormat("======[ JOB INICIO ]====== Job {0} → impresora={1} ip={2} estado={3} reintentos={4}/{5}",
                 job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, job.ImpresoraIp,
                 job.Estado, job.Reintentos, job.MaxReintentos);
+
+            // Guard: Verificar si este job ya fue impreso (hash anti-duplicación)
+            if (_jobManager.IsAlreadyPrinted(job.JobId))
+            {
+                _jobManager.MarkDone(job);
+                LogPrint(job, "DONE", "Ya impreso (hash anti-duplicación)");
+                _callbackNotifier.NotifyStatusChangeFireAndForget(job, "DONE");
+                Log.WarnFormat("[GUARD] Job {0} ya impreso (hash encontrado) — omitido", job.JobId);
+                return;
+            }
 
             // ═══════════════════════════════════════════════════════════════════
             // Consultar impresora en BD UNA SOLA VEZ (tipo conexión + IP actualizada)
@@ -342,24 +365,30 @@ namespace PrinterServices.Workers
                 return;
             }
 
-            // RAZÓN: Verificar tapa abierta — si está abierta, la impresora acepta datos TCP
-            // pero los bufferiza y los imprime al cerrar, causando impresiones inesperadas.
-            // Es un ERROR, no espera: el Front debe mostrar el modal de fallo con el motivo.
+            // Verificar tapa abierta (confirmada por DLE EOT bit 2 del offline byte)
             if (printerStatus.TapaAbierta)
             {
                 Log.WarnFormat("======[ TAPA ABIERTA ]====== Job {0} → {1} ({2}) raw={3}",
                     job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, effectiveIp, printerResponseRaw);
 
-                _jobManager.MarkFailed(job, "Tapa abierta");                       // Marcar como FAILED con motivo
-                LogPrint(job, "FAILED", "Tapa abierta");                           // Log con estado FAILED
-                // Notificar FAILED por tapa abierta via gRPC → servidores + cliente origen
+                _jobManager.MarkFailed(job, "Tapa abierta");
+                LogPrint(job, "FAILED", "Tapa abierta");
                 NotifyIfAvailable(n => n.NotifyPrintFailed(
                     job.JobId, job.ComandaId, job.ImpresoraId,
                     job.ImpresoraNombre, job.DeviceIdOrigen, job.IpOrigen,
-                    "Tapa abierta", job.Reintentos));                               // Motivo: Tapa abierta
-                // Fase 23: Callback HTTP a QuipuNetX — notificar FAILED tapa abierta (fire-and-forget)
+                    "Tapa abierta", job.Reintentos));
                 _callbackNotifier.NotifyStatusChangeFireAndForget(job, "FAILED", "Tapa abierta");
                 return;
+            }
+
+            // DLE no respondió pero TCP OK: la impresora está en red pero no procesó comandos de estado.
+            // Puede ser busy transitorio (TM-T88VII) o tapa abierta real (TM-T20IIIL).
+            // Intentar imprimir de todos modos — si la impresora tiene un problema real,
+            // el envío TCP fallará y HandleFailure lo manejará con reintentos.
+            if (!printerStatus.DisponibleParaImprimir && printerStatus.ErrorRecuperable)
+            {
+                Log.WarnFormat("======[ DLE NO RESPONDE ]====== Job {0} → {1} ({2}) raw={3} — intentando imprimir de todos modos",
+                    job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, effectiveIp, printerResponseRaw);
             }
 
             Log.InfoFormat("======[ PRE-CHECK OK ]====== Job {0} → IMPRIMIENDO en {1} ({2}:{3}) raw={4}",
@@ -369,6 +398,10 @@ namespace PrinterServices.Workers
 
             // Construir payload ESC/POS
             byte[] payload = BuildPayload(driver, job);
+
+            // Guard: Registrar hash ANTES de enviar bytes (protege contra crash post-impresión)
+            string contentHash = PrintJobManager.CalculateContentHash(job);
+            _jobManager.RegisterPrintHash(job, contentHash);
 
             // Enviar por cada copia (FASE 8: medir solo primera copia para timing)
             for (int copia = 0; copia < job.Copias; copia++)
@@ -526,8 +559,12 @@ namespace PrinterServices.Workers
             // RAZÓN: POS 57 activa = QuipuNet generó CadenaHTML con tags HTML (<h2>, <b>, etc.)
             // y el Front la imprimiría como bitmap via HtmlBitmapRenderer. PS replica ese comportamiento.
             // Mismo fallback que PrintUtil.ProcesarModoEthernet: CadenaHTML ?? Cadena.
+            // FIX: Precuentas siempre usan formato mejorado (HTML→Bitmap) aunque FormatoComandaMejorada
+            // no esté persistido en BD (se pierde en retry). TipoImpresion="precuenta" fuerza el path.
+            bool esPrecuenta = !string.IsNullOrEmpty(job.TipoImpresion)
+                && job.TipoImpresion.ToLowerInvariant().Contains("precuenta");
             string htmlParaRenderizar = null;
-            if (job.FormatoComandaMejorada)
+            if (job.FormatoComandaMejorada || esPrecuenta)
             {
                 htmlParaRenderizar = !string.IsNullOrEmpty(job.ContenidoHtml) ? job.ContenidoHtml : job.Contenido;
             }
@@ -706,6 +743,10 @@ namespace PrinterServices.Workers
                 driver.ModelName, job.PrinterModel ?? "null");
 
             byte[] payload = BuildPayload(driver, job);
+
+            // Guard: Registrar hash ANTES de enviar bytes (protege contra crash post-impresión) — flujo USB
+            string contentHash = PrintJobManager.CalculateContentHash(job);
+            _jobManager.RegisterPrintHash(job, contentHash);
 
             // Enviar por cada copia
             for (int copia = 0; copia < job.Copias; copia++)

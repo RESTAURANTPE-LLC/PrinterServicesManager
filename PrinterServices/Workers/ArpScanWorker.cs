@@ -34,16 +34,21 @@ namespace PrinterServices.Workers
         private readonly PrinterServiceDb _db; // Referencia a la base de datos para actualizar impresoras
         private readonly ConcurrentQueue<string> _scanQueue; // Cola de impresoras pendientes de escanear
         private readonly ConcurrentDictionary<string, CancellationTokenSource> _activeScansCts; // Scans activos (impresoraId → CTS para cancelar)
+        private readonly ConcurrentDictionary<string, DateTime> _lastScanTime; // Cooldown: último scan por impresora
         private readonly SemaphoreSlim _signal; // Señal para despertar el worker cuando hay nueva solicitud
-        
+
         private Task _workerTask; // Tarea del worker en background
         private CancellationTokenSource _lifetimeCts; // CancellationToken para ciclo de vida del worker
+
+        // Cooldown entre scans para la misma impresora (evita saturar red)
+        private const int SCAN_COOLDOWN_SECONDS = 30;
 
         public ArpScanWorker(PrinterServiceDb db)
         {
             _db = db; // Guardar referencia a BD
             _scanQueue = new ConcurrentQueue<string>(); // Inicializar cola de solicitudes
             _activeScansCts = new ConcurrentDictionary<string, CancellationTokenSource>(); // Inicializar dict de scans activos
+            _lastScanTime = new ConcurrentDictionary<string, DateTime>(); // Inicializar cooldown
             _signal = new SemaphoreSlim(0); // Inicializar semáforo bloqueado (0 = sin señales)
         }
 
@@ -121,14 +126,22 @@ namespace PrinterServices.Workers
             // Verificar si ya hay un scan activo para esta impresora
             if (_activeScansCts.ContainsKey(impresoraId))
             {
-                Log.DebugFormat("[ARP-WORKER] Scan ya en progreso para {0}, ignorando duplicado", impresoraId);
                 return; // Ya hay un scan activo, no encolar duplicado
             }
 
+            // Cooldown: no escanear la misma impresora más de 1 vez cada 30s
+            DateTime lastScan;
+            if (_lastScanTime.TryGetValue(impresoraId, out lastScan)
+                && (DateTime.Now - lastScan).TotalSeconds < SCAN_COOLDOWN_SECONDS)
+            {
+                return; // Cooldown activo, esperar
+            }
+
+            _lastScanTime[impresoraId] = DateTime.Now; // Registrar timestamp
             _scanQueue.Enqueue(impresoraId); // Encolar solicitud
             _signal.Release(); // Despertar worker (liberar semáforo)
-            
-            Log.InfoFormat("[ARP-WORKER] ⏰ Solicitud de scan ARP encolada: {0}", impresoraId);
+
+            Log.InfoFormat("======[ ARP SCAN ]====== Solicitud encolada: {0}", impresoraId);
         }
 
         /// <summary>
@@ -144,8 +157,10 @@ namespace PrinterServices.Workers
             if (_activeScansCts.TryRemove(impresoraId, out cts)) // Intentar remover scan activo
             {
                 cts.Cancel(); // Solicitar cancelación
-                Log.InfoFormat("[ARP-WORKER] ✗ Scan ARP cancelado: {0} (impresora volvió online)", impresoraId);
             }
+            // Limpiar cooldown para que pueda escanearse inmediatamente si vuelve a caer
+            DateTime _;
+            _lastScanTime.TryRemove(impresoraId, out _);
         }
 
         /// <summary>

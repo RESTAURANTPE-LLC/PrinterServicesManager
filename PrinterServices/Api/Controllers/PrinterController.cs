@@ -60,6 +60,65 @@ namespace PrinterServices.Api.Controllers
             }
         }
 
+        /// <summary>
+        /// PUT /api/printer/update — Editar impresora desde dashboard.
+        /// Solo actualiza: nombre, ip, puerto, modelo.
+        /// MAC NO se modifica (es identificador único de hardware).
+        /// IP solo puede ser sobreescrita por la capa de red si confirma online.
+        /// </summary>
+        public ApiResult UpdatePrinter(string body)
+        {
+            try
+            {
+                var json = JObject.Parse(body);
+                string impresoraId = json.Value<string>("impresoraId");
+
+                if (string.IsNullOrEmpty(impresoraId))
+                {
+                    return ApiResult.BadRequest("impresoraId es requerido");
+                }
+
+                var printer = _db.Table<PrinterEntity>()
+                    .FirstOrDefault(p => p.ImpresoraId == impresoraId);
+
+                if (printer == null)
+                {
+                    return ApiResult.NotFound();
+                }
+
+                // Actualizar solo campos editables (MAC NUNCA se toca)
+                if (json["nombre"] != null)
+                    printer.Nombre = json.Value<string>("nombre");
+                if (json["ip"] != null)
+                    printer.Ip = json.Value<string>("ip");
+                if (json["puerto"] != null)
+                    printer.Puerto = json.Value<int>("puerto");
+                if (json["modelo"] != null)
+                    printer.Modelo = json.Value<string>("modelo");
+
+                _db.Update(printer);
+
+                Log.InfoFormat("======[ PRINTER EDIT ]====== {0} actualizada desde dashboard: ip={1} puerto={2} nombre={3}",
+                    impresoraId, printer.Ip, printer.Puerto, printer.Nombre);
+
+                return ApiResult.Ok(JsonConvert.SerializeObject(new
+                {
+                    status = "UPDATED",
+                    impresoraId = printer.ImpresoraId,
+                    nombre = printer.Nombre,
+                    ip = printer.Ip,
+                    puerto = printer.Puerto,
+                    modelo = printer.Modelo,
+                    macAddress = printer.MacAddress
+                }));
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[PRINTER] Error actualizando impresora: " + ex.Message, ex);
+                return ApiResult.Error(ex.Message);
+            }
+        }
+
         public ApiResult GetPrinterStatus(string impresoraId)
         {
             try
@@ -138,12 +197,25 @@ namespace PrinterServices.Api.Controllers
 
                 if (existing != null)
                 {
-                    // Actualizar
-                    existing.Ip = ip ?? existing.Ip;
+                    // Actualizar — IP solo si la impresora está OFFLINE (misma regla que SyncPrinters)
+                    if (existing.EstadoOnline != 1 && !string.IsNullOrEmpty(ip))
+                    {
+                        existing.Ip = ip;
+                    }
+                    else if (!string.IsNullOrEmpty(ip) && ip != existing.Ip)
+                    {
+                        Log.InfoFormat("======[ REGISTER IP IGNORADA ]====== {0} está ONLINE en {1}, request envió {2}",
+                            existing.Nombre ?? existing.ImpresoraId, existing.Ip, ip);
+                    }
                     existing.Nombre = GetString(json, "nombre") ?? existing.Nombre;
                     existing.Modelo = GetString(json, "modelo") ?? GetString(json, "printermodel") ?? existing.Modelo;
                     existing.ModoImpresion = GetString(json, "modo_impresion") ?? existing.ModoImpresion;
-                    existing.MacAddress = GetString(json, "mac_address") ?? existing.MacAddress;
+                    // MAC solo si no tiene una aún
+                    string newMac = GetString(json, "mac_address");
+                    if (string.IsNullOrEmpty(existing.MacAddress) && !string.IsNullOrEmpty(newMac))
+                    {
+                        existing.MacAddress = newMac;
+                    }
 
                     // Campos USB
                     existing.TipoConexion = tipoConexion;
@@ -170,8 +242,11 @@ namespace PrinterServices.Api.Controllers
                             existing.MacAddress, impresoraId).FirstOrDefault();
                         if (macDuplicate != null)
                         {
-                            // Actualizar la impresora que ya tiene esa MAC con los datos nuevos
-                            macDuplicate.Ip = ip;
+                            // Actualizar la impresora que ya tiene esa MAC — IP solo si está OFFLINE
+                            if (macDuplicate.EstadoOnline != 1 && !string.IsNullOrEmpty(ip))
+                            {
+                                macDuplicate.Ip = ip;
+                            }
                             macDuplicate.Nombre = GetString(json, "nombre") ?? macDuplicate.Nombre;
                             macDuplicate.Modelo = GetString(json, "modelo") ?? GetString(json, "printermodel") ?? macDuplicate.Modelo;
                             macDuplicate.ModoImpresion = GetString(json, "modo_impresion") ?? macDuplicate.ModoImpresion;
@@ -225,8 +300,11 @@ namespace PrinterServices.Api.Controllers
                             printer.MacAddress, impresoraId).FirstOrDefault();
                         if (macDuplicate != null)
                         {
-                            // Actualizar la impresora que ya tiene esa MAC con los datos nuevos
-                            macDuplicate.Ip = ip;
+                            // Actualizar la impresora que ya tiene esa MAC — IP solo si está OFFLINE
+                            if (macDuplicate.EstadoOnline != 1 && !string.IsNullOrEmpty(ip))
+                            {
+                                macDuplicate.Ip = ip;
+                            }
                             macDuplicate.Nombre = printer.Nombre ?? macDuplicate.Nombre;
                             macDuplicate.Modelo = printer.Modelo ?? macDuplicate.Modelo;
                             macDuplicate.ModoImpresion = printer.ModoImpresion ?? macDuplicate.ModoImpresion;
@@ -349,10 +427,26 @@ namespace PrinterServices.Api.Controllers
                         // ═══════════════════════════════════════════════════════
                         // ACTUALIZAR impresora existente
                         // ═══════════════════════════════════════════════════════
-                        existing.Ip = dto.ip; // Actualizar IP
+                        // IP: Solo actualizar si la impresora está OFFLINE en PrinterServices.
+                        // Si está ONLINE, la IP actual fue confirmada por la capa de red (StatusMonitor/ARP)
+                        // y es más confiable que la IP que QuipuNet envía (puede estar desactualizada).
+                        if (existing.EstadoOnline != 1 && !string.IsNullOrEmpty(dto.ip))
+                        {
+                            existing.Ip = dto.ip;
+                        }
+                        else if (!string.IsNullOrEmpty(dto.ip) && dto.ip != existing.Ip)
+                        {
+                            Log.InfoFormat("======[ SYNC IP IGNORADA ]====== {0} está ONLINE en {1}, QuipuNet envió {2} — se mantiene IP actual",
+                                existing.Nombre ?? existing.ImpresoraId, existing.Ip, dto.ip);
+                        }
                         existing.Nombre = dto.nombre ?? existing.Nombre; // Actualizar nombre (si viene)
                         existing.Puerto = dto.puerto > 0 ? dto.puerto : existing.Puerto; // Actualizar puerto (si viene > 0)
-                        existing.MacAddress = dto.mac_address ?? existing.MacAddress; // Actualizar MAC (si viene)
+                        // MAC: Solo actualizar si la impresora NO tiene MAC aún (primera vez).
+                        // Una vez asignada, la MAC es inmutable (identificador de hardware).
+                        if (string.IsNullOrEmpty(existing.MacAddress) && !string.IsNullOrEmpty(dto.mac_address))
+                        {
+                            existing.MacAddress = dto.mac_address;
+                        }
                         // NOTA: NO actualizar estado online/offline - eso lo maneja StatusMonitor
 
                         // Dedup por MAC: si otra impresora ya tiene la misma MAC, es el mismo dispositivo físico
@@ -364,8 +458,11 @@ namespace PrinterServices.Api.Controllers
                                 existing.MacAddress, dto.impresora_id).FirstOrDefault();
                             if (macDuplicate != null)
                             {
-                                // Actualizar la impresora que ya tiene esa MAC con los datos nuevos
-                                macDuplicate.Ip = dto.ip;
+                                // Actualizar la impresora que ya tiene esa MAC — IP solo si está OFFLINE
+                                if (macDuplicate.EstadoOnline != 1 && !string.IsNullOrEmpty(dto.ip))
+                                {
+                                    macDuplicate.Ip = dto.ip;
+                                }
                                 macDuplicate.Nombre = dto.nombre ?? macDuplicate.Nombre;
                                 macDuplicate.Puerto = dto.puerto > 0 ? dto.puerto : macDuplicate.Puerto;
                                 _db.Update(macDuplicate);
@@ -414,8 +511,11 @@ namespace PrinterServices.Api.Controllers
                                 newPrinter.MacAddress, dto.impresora_id).FirstOrDefault();
                             if (macDuplicate != null)
                             {
-                                // Actualizar la impresora que ya tiene esa MAC con los datos nuevos
-                                macDuplicate.Ip = dto.ip;
+                                // Actualizar la impresora que ya tiene esa MAC — IP solo si está OFFLINE
+                                if (macDuplicate.EstadoOnline != 1 && !string.IsNullOrEmpty(dto.ip))
+                                {
+                                    macDuplicate.Ip = dto.ip;
+                                }
                                 macDuplicate.Nombre = dto.nombre ?? macDuplicate.Nombre;
                                 macDuplicate.Puerto = dto.puerto > 0 ? dto.puerto : macDuplicate.Puerto;
                                 _db.Update(macDuplicate);

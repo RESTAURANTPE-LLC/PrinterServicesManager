@@ -212,7 +212,7 @@ namespace PrinterServices.Api.Controllers
             }
 
             job.Reintentos = 0;
-            _jobManager.Retry(job);
+            _jobManager.RetryManual(job); // Guard: permite salir de FAILED/EXPIRED, elimina hash previo
 
             var response = new
             {

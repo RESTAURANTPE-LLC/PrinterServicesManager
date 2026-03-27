@@ -123,6 +123,22 @@ namespace PrinterServices.Config
             }
         }
 
+        /// <summary>
+        /// Actualiza la entidad completa en BD (incluye MinValue, MaxValue, etc.)
+        /// </summary>
+        public void UpdateEntity(ConfigSettingEntity entity)
+        {
+            try
+            {
+                entity.UpdatedAt = DateTime.Now.ToString("o");
+                _db.Update(entity);
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[CONFIG] Error actualizando entidad " + entity.Key + ": " + ex.Message, ex);
+            }
+        }
+
         public void SetInt(string key, int value)
         {
             Set(key, value.ToString());
@@ -284,9 +300,9 @@ namespace PrinterServices.Config
                 // ── Monitoring ──
                 new ConfigSettingEntity
                 {
-                    Key = "StatusCheckIntervalSeconds", Value = "3", DefaultValue = "3",
-                    Description = "Intervalo en segundos entre checks de estado de impresoras (3s con SNMP es óptimo, 15s para solo DLE EOT)",
-                    Category = "monitoring", ValueType = "int", MinValue = "5", MaxValue = "300"
+                    Key = "StatusCheckIntervalSeconds", Value = "2", DefaultValue = "2",
+                    Description = "Intervalo en segundos entre checks de estado de impresoras",
+                    Category = "monitoring", ValueType = "int", MinValue = "1", MaxValue = "300"
                 },
 
                 // ── gRPC / Discovery (futuro) ──

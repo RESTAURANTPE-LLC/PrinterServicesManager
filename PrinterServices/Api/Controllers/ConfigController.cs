@@ -103,6 +103,33 @@ namespace PrinterServices.Api.Controllers
             }
         }
 
+        /// <summary>
+        /// Actualiza MinValue y/o MaxValue de un setting en BD.
+        /// Llamado por GET /api/config/set?key=X&value=Y&minvalue=Z&maxvalue=W
+        /// </summary>
+        public void UpdateSettingRange(string key, string minValue, string maxValue)
+        {
+            try
+            {
+                var all = _config.GetAll();
+                var existing = all.FirstOrDefault(s =>
+                    s.Key.Equals(key, StringComparison.OrdinalIgnoreCase));
+
+                if (existing != null)
+                {
+                    if (minValue != null) existing.MinValue = minValue;
+                    if (maxValue != null) existing.MaxValue = maxValue;
+                    _config.UpdateEntity(existing);
+                    Log.InfoFormat("[CONFIG-API] Rango actualizado: {0} min={1} max={2}",
+                        key, existing.MinValue, existing.MaxValue);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("[CONFIG-API] Error actualizando rango de " + key + ": " + ex.Message);
+            }
+        }
+
         public ApiResult UpdateSetting(string body)
         {
             try

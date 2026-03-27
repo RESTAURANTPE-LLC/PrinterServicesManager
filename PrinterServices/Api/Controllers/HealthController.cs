@@ -23,7 +23,7 @@ namespace PrinterServices.Api.Controllers
             var response = new
             {
                 status = "OK",
-                version = "1.0.0",
+                version = Core.ServiceVersion.FullVersion,
                 uptime = string.Format("{0}d {1}h {2}m {3}s", uptime.Days, uptime.Hours, uptime.Minutes, uptime.Seconds),
                 uptimeSeconds = (int)uptime.TotalSeconds,
                 database = _db != null ? "Connected" : "Disconnected",

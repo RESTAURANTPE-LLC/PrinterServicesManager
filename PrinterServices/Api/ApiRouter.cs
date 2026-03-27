@@ -118,6 +118,11 @@ namespace PrinterServices.Api
                 string body = await ReadBodyAsync(request);
                 return _printerController.RegisterPrinter(body);
             }
+            if (method == "PUT" && path == "/api/printer/update")
+            {
+                string body = await ReadBodyAsync(request);
+                return _printerController.UpdatePrinter(body);
+            }
             if (method == "POST" && path == "/api/printers/sync")
             {
                 string body = await ReadBodyAsync(request); // Leer body JSON del request
@@ -165,6 +170,28 @@ namespace PrinterServices.Api
             if (method == "GET" && path == "/api/config")
             {
                 return _configController.GetAll();
+            }
+            // GET /api/config/set?key=X&value=Y&minvalue=Z&maxvalue=W
+            // IMPORTANTE: Debe ir ANTES de /api/config/{key} para que no lo intercepte
+            if (method == "GET" && path == "/api/config/set")
+            {
+                string key = request.QueryString["key"];
+                string value = request.QueryString["value"];
+                string minValue = request.QueryString["minvalue"];
+                string maxValue = request.QueryString["maxvalue"];
+
+                if (string.IsNullOrEmpty(key) || value == null)
+                {
+                    return ApiResult.BadRequest("Parámetros requeridos: ?key=X&value=Y  (opcionales: &minvalue=Z&maxvalue=W)");
+                }
+
+                if (minValue != null || maxValue != null)
+                {
+                    _configController.UpdateSettingRange(key, minValue, maxValue);
+                }
+
+                string json = "{\"key\":\"" + key + "\",\"value\":\"" + value + "\"}";
+                return _configController.UpdateSetting(json);
             }
             if (method == "GET" && path.StartsWith("/api/config/category/"))
             {

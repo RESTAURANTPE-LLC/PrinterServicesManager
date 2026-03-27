@@ -699,13 +699,10 @@ namespace PrinterServices.Api.Controllers
                 })
                 .ToList();
 
-            // RAZÓN: Obtener versión del assembly para identificación en dashboard
-            var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
-
             // RAZÓN: Construir response completo
             return new
             {
-                version = version != null ? version.ToString() : "desconocida",
+                version = Core.ServiceVersion.FullVersion,
                 timestamp = DateTime.Now.ToString("o"),
                 network = new
                 {
