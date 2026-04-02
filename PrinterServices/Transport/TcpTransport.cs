@@ -74,8 +74,38 @@ namespace PrinterServices.Transport
                 throw new InvalidOperationException("No hay conexión TCP activa");
             }
 
-            await _stream.WriteAsync(data, 0, data.Length, ct);
-            await _stream.FlushAsync(ct);
+            var cfg = ConfigManager.Instance;
+            bool chunkEnabled = cfg.GetBool("TcpChunkEnabled", false);
+
+            if (!chunkEnabled || data.Length <= 4096)
+            {
+                // Envío atómico (comportamiento original)
+                await _stream.WriteAsync(data, 0, data.Length, ct);
+                await _stream.FlushAsync(ct);
+            }
+            else
+            {
+                // Envío fragmentado: evita saturar el buffer de impresoras térmicas
+                // con payloads grandes (bitmap raster > 4KB)
+                int chunkSize = cfg.GetInt("TcpChunkSizeBytes", 4096);
+                int delayMs = cfg.GetInt("TcpChunkDelayMs", 5);
+
+                Log.DebugFormat("[TCP] Chunked send: {0} bytes en bloques de {1} bytes (delay={2}ms)",
+                    data.Length, chunkSize, delayMs);
+
+                for (int offset = 0; offset < data.Length; offset += chunkSize)
+                {
+                    int bytesToSend = Math.Min(chunkSize, data.Length - offset);
+                    await _stream.WriteAsync(data, offset, bytesToSend, ct);
+                    await _stream.FlushAsync(ct);
+
+                    // Pausa entre chunks para que la impresora procese
+                    if (offset + bytesToSend < data.Length)
+                    {
+                        await Task.Delay(delayMs, ct);
+                    }
+                }
+            }
         }
 
         public async Task<byte[]> ReceiveAsync(int length, int timeoutMs, CancellationToken ct)

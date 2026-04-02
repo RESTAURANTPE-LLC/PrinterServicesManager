@@ -11,7 +11,7 @@ namespace PrinterServices.Core
     public static class ServiceVersion
     {
         public const string Version = "1.1.1";
-        public const string BuildTag = "printjob-lca-v1";
+        public const string BuildTag = "printjob-lca-v2";
         public const string FullVersion = Version + "-" + BuildTag;
     }
 }

@@ -480,7 +480,7 @@ namespace PrinterServices.Workers
                         using (Bitmap bmp = Rendering.ComandaBitmapRenderer.RenderFromLines(renderLines))
                         using (Bitmap resized = BitmapResizer.ResizeIfNeeded(bmp, 576))
                         {
-                            builder.AddBitmapFromImage(resized);
+                            AddBitmapByEmulation(builder, resized);
                         }
 
                         if (job.AbreGaveta)
@@ -541,7 +541,7 @@ namespace PrinterServices.Workers
                     using (Bitmap bmp = Rendering.ComandaBitmapRenderer.RenderFromLines(renderLines))
                     using (Bitmap resized = BitmapResizer.ResizeIfNeeded(bmp, 576))
                     {
-                        builder.AddBitmapFromImage(resized);
+                        AddBitmapByEmulation(builder, resized);
                     }
 
                     if (job.AbreGaveta)
@@ -582,7 +582,7 @@ namespace PrinterServices.Workers
                 using (Bitmap bmp = HtmlBitmapRenderer.RenderSimpleHtmlAsBitmap(htmlParaRenderizar))
                 using (Bitmap resized = BitmapResizer.ResizeIfNeeded(bmp, 576))
                 {
-                    builder.AddBitmapFromImage(resized);
+                    AddBitmapByEmulation(builder, resized);
                 }
 
                 if (job.AbreGaveta)
@@ -981,6 +981,24 @@ namespace PrinterServices.Workers
         /// RAZÓN: QuipuNet envía impresora_tamanioqr como string (ej: "3", "5").
         /// El Front usa configurarTamanoQr() que mapea estos valores a moduleSize del ESC/POS.
         /// </summary>
+        /// <summary>
+        /// Agrega bitmap al builder usando el modo configurado en BitmapEmulacion:
+        /// "escpos" → GS v 0 (raster estándar Epson)
+        /// "escasterisc" → ESC * modo 33 (bit image por bandas, compatible CUSTOM/POS)
+        /// </summary>
+        private static void AddBitmapByEmulation(EscPosCommandBuilder builder, Bitmap bmp)
+        {
+            string emulacion = ConfigManager.Instance.GetString("BitmapEmulacion", "escpos").ToLowerInvariant().Trim();
+            if (emulacion == "escasterisc")
+            {
+                builder.AddBitmapEscAsterisk(bmp);
+            }
+            else
+            {
+                builder.AddBitmapFromImage(bmp);
+            }
+        }
+
         private static int ParseQrSize(string tamanioQr, int defaultSize)
         {
             if (string.IsNullOrEmpty(tamanioQr)) return defaultSize;         // Sin config → default

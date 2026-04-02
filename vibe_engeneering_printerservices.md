@@ -4492,3 +4492,192 @@ Al crear un nuevo flujo de impresión que use PrinterServices en el Front WPF:
 - [ ] `try/catch` con NLog para capturar excepciones dentro del Dispatcher
 
 ---
+
+## 25. TCP Chunked Send — Fix corrupción de productos en comandas bitmap
+
+### 25.1 Problema detectado
+
+**Síntoma**: Las comandas impresas via PrinterServices muestran los headers correctamente (MESA, AREA, FECHA, MOZO, etc.) pero los **productos aparecen corruptos, garbled o directamente no se imprimen**. La sección de "FIN PEDIDO" vuelve a imprimirse bien. En modo texto plano (sin bitmap) la comanda imprime correctamente al 100%.
+
+**Evidencia visual**:
+- Primer producto puede salir bien, segundo producto garbled
+- Caracteres dispersos, texto cortado, líneas incompletas
+- Solo afecta la zona de productos (que se renderiza como bitmap raster)
+
+### 25.2 Causa raíz
+
+**Saturación del buffer de recepción de la impresora térmica.**
+
+Cadena del problema:
+
+```
+ComandaDocument.GenerarLineas()
+  → ComandaBitmapRenderer.RenderFromLines() → Bitmap (576px ancho)
+    → EscPosCommandBuilder.AddBitmapFromImage()
+      → GS v 0 (raster command) + datos de CADA fila del bitmap
+        → Build() concatena TODO en un solo byte[] (50-200KB)
+          → TcpTransport.SendAsync() → WriteAsync(data, 0, data.Length)
+            → Impresora recibe 100KB+ de golpe con NoDelay=true
+              → Buffer interno (4-16KB) se satura
+                → PÉRDIDA DE DATOS en medio del bitmap
+                  → Productos corruptos, header y footer OK
+```
+
+**Por qué el header imprime bien**: Se envía como comandos ESC/POS de texto (~50-80 bytes por línea). La impresora los procesa al vuelo.
+
+**Por qué FIN PEDIDO imprime bien**: Los bytes del footer llegan después de que el buffer se vacía (la impresora ya procesó lo que pudo del bitmap).
+
+**Por qué modo texto funciona**: En modo texto (Priority 4 en BuildPayload), cada línea son pocos bytes de ESC/POS. Nunca se llena el buffer.
+
+### 25.3 Solución: TCP Chunked Send (feature flag)
+
+Se implementó envío fragmentado en `TcpTransport.SendAsync()` controlado por configuración:
+
+**Archivos modificados:**
+- `PrinterServices/Config/ConfigManager.cs` — 3 nuevos parámetros en `SeedDefaults()`
+- `PrinterServices/Transport/TcpTransport.cs` — lógica de chunking en `SendAsync()`
+
+**Parámetros de configuración (categoría: `network`):**
+
+| Key | Tipo | Default | Rango | Descripción |
+|-----|------|---------|-------|-------------|
+| `TcpChunkEnabled` | bool | `0` (OFF) | 0/1 | Feature flag. Habilita envío fragmentado a impresoras TCP. |
+| `TcpChunkSizeBytes` | int | `4096` | 256-65536 | Tamaño de cada fragmento en bytes. |
+| `TcpChunkDelayMs` | int | `5` | 1-200 | Pausa en ms entre fragmentos. |
+
+**Lógica implementada en `TcpTransport.SendAsync()`:**
+
+```
+SI TcpChunkEnabled == false O payload <= 4096 bytes:
+    → Envío atómico original (WriteAsync + FlushAsync de todo el bloque)
+
+SI TcpChunkEnabled == true Y payload > 4096 bytes:
+    → Envío fragmentado:
+       PARA CADA chunk de TcpChunkSizeBytes:
+         1. WriteAsync(data, offset, bytesToSend)
+         2. FlushAsync()
+         3. Task.Delay(TcpChunkDelayMs) — si no es el último chunk
+```
+
+**Comportamiento por defecto: OFF** — no afecta a ninguna instalación existente.
+
+### 25.4 Cómo activar y calibrar
+
+**Activar via API:**
+```http
+PUT http://localhost:8090/api/config
+Content-Type: application/json
+
+{"key": "TcpChunkEnabled", "value": "1"}
+```
+
+**Si sigue cortando productos, reducir chunk size:**
+```http
+PUT http://localhost:8090/api/config
+{"key": "TcpChunkSizeBytes", "value": "2048"}
+```
+
+**Si se ve lento, reducir el delay:**
+```http
+PUT http://localhost:8090/api/config
+{"key": "TcpChunkDelayMs", "value": "2"}
+```
+
+**Valores recomendados por tipo de impresora:**
+
+| Impresora | Buffer estimado | ChunkSize | DelayMs | Notas |
+|-----------|----------------|-----------|---------|-------|
+| Epson TM-T20/T88 | 16-64KB | 4096 | 5 | Buffer grande, chunk default suficiente |
+| Star TSP143 | 8-16KB | 2048 | 10 | Buffer mediano |
+| Bixolon SRP-350 | 4-8KB | 1024 | 15 | Buffer pequeño, necesita chunks más chicos |
+| Genérica china 80mm | 2-4KB | 1024 | 20 | Buffer muy pequeño, chunks chicos + delay alto |
+
+### 25.5 Diagnóstico
+
+Con `TcpChunkEnabled=1`, el log muestra por cada impresión:
+
+```
+[TCP] Chunked send: 87432 bytes en bloques de 4096 bytes (delay=5ms)
+```
+
+Si el problema persiste con chunking activado:
+1. Verificar que la impresora problemática tiene IP fija (no DHCP cambiante)
+2. Reducir `TcpChunkSizeBytes` a `1024` y `TcpChunkDelayMs` a `20`
+3. Si con chunk de 1024 y delay de 20ms sigue fallando, el problema NO es el buffer — verificar cable de red, switch, o driver de impresora
+
+### 25.6 Pipeline de renderizado — referencia completa
+
+Para entender qué modo de renderizado usa cada comanda (BuildPayload en PrintWorker.cs):
+
+```
+Priority 1: DISEÑADOR VISUAL (UtilizarDisenadorComandas + Documento)
+  → Bitmap vía ComandaBitmapRenderer.RenderFromLines()
+  → GS v 0 raster → PAYLOAD GRANDE (afectado por este fix)
+
+Priority 2: LINEAS / JSON (LineasImprimirJson)
+  → LineaParser.BuildFromLineas()
+  → ESC/POS texto con formato por línea → PAYLOAD CHICO (no afectado)
+
+Priority 3: FORMATO ANTIGUO (FormatoAntiguoServicio + Documento)
+  → Bitmap GDI legacy → PAYLOAD GRANDE (afectado)
+
+Priority 4: HTML → BITMAP (FormatoComandaMejorada / ContenidoHtml)
+  → HtmlBitmapRenderer → Bitmap → PAYLOAD GRANDE (afectado)
+
+Priority 5: CADENA / TEXTO PLANO (default)
+  → ESC/POS texto directo → PAYLOAD CHICO (no afectado)
+```
+
+Nota: El threshold de 4096 bytes en el `if` de SendAsync garantiza que los modos de texto (Priority 2 y 5) nunca entren al path de chunking, evitando overhead innecesario.
+
+---
+
+## 26. Reglas Críticas para Desarrollo
+
+### 26.1 Actualización de versiones y bases de datos preexistentes
+
+**REGLA OBLIGATORIA**: Cada vez que se agreguen nuevos registros de configuración (en `SeedDefaults()` de `ConfigManager.cs`), columnas, tablas o cualquier estructura en la base de datos, se **DEBE** considerar que en producción existen bases de datos preexistentes con datos reales.
+
+**Patrón actual implementado en `SeedDefaults()`:**
+
+```csharp
+foreach (var setting in defaults)
+{
+    var existing = _db.Query<ConfigSettingEntity>(
+        "SELECT * FROM config_settings WHERE key = ?", setting.Key).FirstOrDefault();
+
+    if (existing == null)  // ← Solo inserta si NO existe
+    {
+        setting.UpdatedAt = DateTime.Now.ToString("o");
+        _db.Insert(setting);
+    }
+}
+```
+
+**Esto significa:**
+- Si una instalación ya tiene la BD con configs anteriores, al actualizar a una versión nueva solo se insertan los registros **nuevos**.
+- Los valores existentes que el usuario haya personalizado via API **NO se sobreescriben**.
+- Este patrón de "insert if not exists" debe mantenerse en toda migración futura.
+
+**Checklist al agregar nuevas configuraciones o estructuras:**
+
+1. **Configs nuevas**: Agregar al array `defaults` en `SeedDefaults()`. El `if (existing == null)` ya protege los valores existentes.
+2. **Columnas nuevas**: Usar `ALTER TABLE ... ADD COLUMN` con manejo de excepción si ya existe (patrón ya usado en `PrinterServiceDb.cs`).
+3. **Tablas nuevas**: Usar `CREATE TABLE IF NOT EXISTS`.
+4. **Índices nuevos**: Usar `CREATE INDEX IF NOT EXISTS` o `CREATE UNIQUE INDEX IF NOT EXISTS`.
+5. **NUNCA**: Hacer `DROP TABLE`, `DELETE FROM config_settings`, o `UPDATE` masivo de valores que el usuario pueda haber personalizado.
+
+> **Principio**: Una actualización de versión jamás debe destruir configuración o datos del usuario. El servicio debe arrancar correctamente tanto en una instalación limpia como en una actualización sobre BD existente.
+
+### 26.2 Endpoints de referencia rápida
+
+| Recurso | Endpoint | Notas |
+|---------|----------|-------|
+| Dashboard (UI HTML) | `GET /api/dashboard` | Panel operativo principal para monitoreo en tiempo real |
+| Dashboard datos JSON | `GET /api/dashboard/data` | Datos en tiempo real para consumo programático |
+| Dashboard historial | `GET /api/dashboard/history?page=N&limit=N` | Historial paginado de jobs |
+| Dashboard notificaciones | `GET /api/dashboard/notifications?page=N&limit=N` | Historial de callbacks a clientes |
+| Configuración | `GET/PUT /api/config` | CRUD de configuraciones (incluye TcpChunk*, network, etc.) |
+| Configuración por categoría | `GET /api/config/category/{category}` | Categorías: network, queue, api, monitoring, integration |
+
+---

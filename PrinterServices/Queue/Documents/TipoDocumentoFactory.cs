@@ -45,6 +45,7 @@ namespace PrinterServices.Queue.Documents
                 Empresa = GetString(json, "empresa"),
                 Comprobante = GetString(json, "comprobante"),
                 Modalidad = GetString(json, "modalidad"),
+                ModalidadPedido = GetString(json, "modalidad_pedido"),
                 DeliveryId = GetString(json, "delivery_identificadorunico"),
                 ModalidadEntrega = GetString(json, "modalidad_entrega_delivery"),
                 HoraRecojo = GetString(json, "hora_recojo"),

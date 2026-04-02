@@ -389,6 +389,34 @@ namespace PrinterServices.Config
                     Key = "QuipuNetXPort", Value = "8081", DefaultValue = "8081",
                     Description = "Puerto HTTP del servidor QuipuNetX para callbacks de estado de jobs",
                     Category = "integration", ValueType = "int", MinValue = "1", MaxValue = "65535"
+                },
+
+                // ── Emulación de bitmap (ESC/POS vs ESC * para impresoras CUSTOM/POS) ──
+                new ConfigSettingEntity
+                {
+                    Key = "BitmapEmulacion", Value = "escpos", DefaultValue = "escpos",
+                    Description = "Modo de envío de bitmaps: 'escpos' usa GS v 0 (raster estándar Epson), 'escasterisc' usa ESC * (bit image por bandas de 24 líneas, compatible con CUSTOM/POS y emulaciones no-Epson).",
+                    Category = "emulacion", ValueType = "string"
+                },
+
+                // ── TCP Chunked Send (fix bitmap corruption en impresoras con buffer pequeño) ──
+                new ConfigSettingEntity
+                {
+                    Key = "TcpChunkEnabled", Value = "0", DefaultValue = "0",
+                    Description = "Enviar datos a impresora en fragmentos (chunks) en vez de un solo bloque. Soluciona corrupción de productos en comandas bitmap cuando la impresora tiene buffer pequeño.",
+                    Category = "network", ValueType = "bool"
+                },
+                new ConfigSettingEntity
+                {
+                    Key = "TcpChunkSizeBytes", Value = "4096", DefaultValue = "4096",
+                    Description = "Tamaño de cada fragmento en bytes al enviar a impresora (solo si TcpChunkEnabled=1). Valores típicos: 1024, 2048, 4096.",
+                    Category = "network", ValueType = "int", MinValue = "256", MaxValue = "65536"
+                },
+                new ConfigSettingEntity
+                {
+                    Key = "TcpChunkDelayMs", Value = "5", DefaultValue = "5",
+                    Description = "Pausa en ms entre fragmentos para que la impresora procese cada chunk (solo si TcpChunkEnabled=1). Valores típicos: 2-20ms.",
+                    Category = "network", ValueType = "int", MinValue = "1", MaxValue = "200"
                 }
             };
 

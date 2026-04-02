@@ -559,6 +559,10 @@
                         <p class="text-lg">${new Date(job.fechaCreacion).toLocaleString()}</p>
                     </div>
                     <div class="bg-gray-700 p-4 rounded col-span-2">
+                        <p class="text-sm text-gray-400">Respuesta Impresora (DLE EOT)</p>
+                        <p class="text-sm font-mono ${job.printerResponse && job.printerResponse.startsWith('OFFLINE') ? 'text-red-400' : 'text-green-400'}">${job.printerResponse || 'Sin respuesta'}</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded col-span-2">
                         <p class="text-sm text-gray-400">Error</p>
                         <p class="text-sm text-red-400">${job.errorMensaje || 'Sin errores'}</p>
                     </div>
@@ -771,6 +775,7 @@
                     api: '🔌 API / Puertos',
                     monitoring: '📡 Monitoreo',
                     integration: '🔗 Integración QuipuNetX',
+                    emulacion: '🖨️ Emulación Impresora',
                     general: '⚙️ General'
                 };
 

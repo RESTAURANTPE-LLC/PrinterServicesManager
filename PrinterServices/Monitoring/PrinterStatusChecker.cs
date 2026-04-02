@@ -95,7 +95,7 @@ namespace PrinterServices.Monitoring
 
                 // ======[ DLE VALIDATION ]====== Validar respuesta DLE EOT.
                 // TM-T20IIIL a veces no responde al primer intento (quirk del modelo).
-                // Si todos los bytes son 0x00, reintentar UNA vez antes de marcar como inválido.
+                // Si todos los bytes son 0x00, reintentar UNA vez antes de asumir que DLE no responde.
                 bool todosEnCero = printerByte == 0x00 && offlineByte == 0x00 && errorByte == 0x00 && paperByte == 0x00;
 
                 if (todosEnCero)
@@ -122,25 +122,48 @@ namespace PrinterServices.Monitoring
                     }
                 }
 
-                bool dleResponseValid = !todosEnCero
-                                     && ((printerByte & 0x12) == 0x12
+                // ======[ REGLA CLAVE: P:00 O:00 E:00 S:00 = DISPONIBLE ]======
+                // Si todos los bytes DLE son 0x00 después del retry, la impresora NO respondió
+                // al protocolo DLE EOT, pero TCP conectó exitosamente.
+                // DECISIÓN: TCP OK = IMPRESORA DISPONIBLE. DLE EOT es diagnóstico, NO bloqueante.
+                // RAZÓN: Muchas impresoras (TM-T20IIIL, genéricas, etc.) no responden DLE EOT
+                // de forma consistente, pero imprimen perfectamente vía TCP.
+                // NO se debe bloquear la impresión por falta de respuesta DLE.
+                if (todosEnCero)
+                {
+                    status.Online = true;
+                    status.DisponibleParaImprimir = true;
+                    status.TienePapel = true;
+                    status.TapaAbierta = false;
+                    status.ErrorRecuperable = false;
+                    status.ErrorMessage = null;
+                    status.RawStatus = "P:00 O:00 E:00 S:00 [TCP_OK_DISPONIBLE]";
+
+                    Log.InfoFormat("[STATUS] {0}:{1} → DLE todo cero pero TCP OK — DISPONIBLE para imprimir (raw={2})",
+                        ip, port, status.RawStatus);
+
+                    return status;
+                }
+
+                bool dleResponseValid = (printerByte & 0x12) == 0x12
                                       || (offlineByte & 0x12) == 0x12
                                       || (errorByte & 0x12) == 0x12
-                                      || (paperByte & 0x12) == 0x12);
+                                      || (paperByte & 0x12) == 0x12;
 
                 if (!dleResponseValid)
                 {
-                    // DLE no respondió pero TCP conectó OK → la impresora ESTÁ en la red.
-                    // PRINCIPIO: TCP OK = DISPONIBLE. DLE EOT es información bonus, no bloqueante.
-                    // En hora rush es crítico no bloquear impresión por un status check fallido.
+                    // DLE respondió algo pero no cumple máscara 0x12 → TCP OK = DISPONIBLE.
+                    // PRINCIPIO: No bloquear impresión por status check ambiguo.
                     status.DisponibleParaImprimir = true;
-                    status.ErrorRecuperable = true;
-                    status.ErrorMessage = "DLE EOT sin respuesta (TCP OK, impresora disponible)";
+                    status.TienePapel = true;
+                    status.TapaAbierta = false;
+                    status.ErrorRecuperable = false;
+                    status.ErrorMessage = null;
 
-                    status.RawStatus = string.Format("P:{0:X2} O:{1:X2} E:{2:X2} S:{3:X2} [TCP_OK]",
+                    status.RawStatus = string.Format("P:{0:X2} O:{1:X2} E:{2:X2} S:{3:X2} [TCP_OK_DISPONIBLE]",
                         printerByte, offlineByte, errorByte, paperByte);
 
-                    Log.DebugFormat("[STATUS] {0}:{1} → DLE sin respuesta válida pero TCP OK — disponible (raw={2})",
+                    Log.InfoFormat("[STATUS] {0}:{1} → DLE sin respuesta válida pero TCP OK — DISPONIBLE (raw={2})",
                         ip, port, status.RawStatus);
 
                     return status;
@@ -258,19 +281,33 @@ namespace PrinterServices.Monitoring
                     }
                 }
 
-                bool dleResponseValid = !todosEnCero
-                                     && ((printerByte & 0x12) == 0x12
+                // ======[ REGLA CLAVE: P:00 = DISPONIBLE ]====== (misma lógica que CheckAsync)
+                if (todosEnCero)
+                {
+                    status.Online = true;
+                    status.DisponibleParaImprimir = true;
+                    status.TienePapel = true;
+                    status.TapaAbierta = false;
+                    status.ErrorRecuperable = false;
+                    status.ErrorMessage = null;
+                    status.RawStatus = "P:00 O:00 E:00 S:00 [TCP_OK_DISPONIBLE]";
+                    return status;
+                }
+
+                bool dleResponseValid = (printerByte & 0x12) == 0x12
                                       || (offlineByte & 0x12) == 0x12
                                       || (errorByte & 0x12) == 0x12
-                                      || (paperByte & 0x12) == 0x12);
+                                      || (paperByte & 0x12) == 0x12;
 
                 if (!dleResponseValid)
                 {
                     // TCP OK = DISPONIBLE (misma lógica que CheckAsync)
                     status.DisponibleParaImprimir = true;
-                    status.ErrorRecuperable = true;
-                    status.ErrorMessage = "DLE EOT sin respuesta (TCP OK, impresora disponible)";
-                    status.RawStatus = string.Format("P:{0:X2} O:{1:X2} E:{2:X2} S:{3:X2} [TCP_OK]",
+                    status.TienePapel = true;
+                    status.TapaAbierta = false;
+                    status.ErrorRecuperable = false;
+                    status.ErrorMessage = null;
+                    status.RawStatus = string.Format("P:{0:X2} O:{1:X2} E:{2:X2} S:{3:X2} [TCP_OK_DISPONIBLE]",
                         printerByte, offlineByte, errorByte, paperByte);
                     return status;
                 }

@@ -40,6 +40,7 @@ namespace PrinterServices.Queue.Documents
         public string Empresa { get; set; }
         public string Comprobante { get; set; }
         public string Modalidad { get; set; }
+        public string ModalidadPedido { get; set; } // "3" = PARA LLEVAR, "2" = VENTA_RAPIDA, "1" = DELIVERY
         public string DeliveryId { get; set; }
         public string ModalidadEntrega { get; set; }
         public string HoraRecojo { get; set; }
@@ -465,11 +466,13 @@ namespace PrinterServices.Queue.Documents
                 case "Empresa": return Empresa;
                 case "Comprobante": return Comprobante;
                 case "Modalidad":
-                    // En el original, Modalidad nunca se muestra como texto directo.
-                    // Solo se usa como condición: si es VENTA_RAPIDA → mostrar "VENTA RÁPIDA"
-                    if (!string.IsNullOrEmpty(Modalidad)
-                        && Modalidad.Equals("VENTA_RAPIDA", StringComparison.OrdinalIgnoreCase))
+                    // ModalidadPedido tiene el ID real ("2"=VENTA_RAPIDA, "3"=PARA_LLEVAR)
+                    // Modalidad puede tener "-1" (PARAM_TODOS) o el texto
+                    string modId = ModalidadPedido ?? Modalidad ?? "";
+                    if (modId == "2" || modId.Equals("VENTA_RAPIDA", StringComparison.OrdinalIgnoreCase))
                         return "VENTA RÁPIDA";
+                    if (modId == "3" || modId.Trim().Equals("PARA LLEVAR", StringComparison.OrdinalIgnoreCase))
+                        return "PARA LLEVAR";
                     return null;
                 case "DeliveryId": return DeliveryId;
                 case "ModalidadEntrega": return ModalidadEntrega;

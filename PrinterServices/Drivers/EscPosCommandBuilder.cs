@@ -295,6 +295,70 @@ namespace PrinterServices.Drivers
             return this;
         }
 
+        /// <summary>
+        /// Envía bitmap usando ESC * (bit image mode 33 = 24-dot double density).
+        /// Procesa la imagen en bandas horizontales de 24 píxeles de alto.
+        /// Más compatible que GS v 0 con emulaciones no-Epson (CUSTOM/POS, Star, etc.)
+        /// porque cada banda es un comando independiente y la impresora procesa banda por banda.
+        /// </summary>
+        public EscPosCommandBuilder AddBitmapEscAsterisk(Bitmap bmp)
+        {
+            if (bmp == null) return this;
+
+            BitmapData bmpData = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height),
+                ImageLockMode.ReadOnly, PixelFormat.Format1bppIndexed);
+
+            int width = bmp.Width;
+            int height = bmp.Height;
+            int stride = bmpData.Stride;
+            IntPtr ptr = bmpData.Scan0;
+            byte[] data = new byte[stride * height];
+            Marshal.Copy(ptr, data, 0, data.Length);
+
+            // ESC 3 24 — Setear line spacing a exactamente 24 dots (elimina gaps entre bandas)
+            _commands.Add(new byte[] { 0x1B, 0x33, 24 });
+
+            // ESC * m nL nH d1...dk — modo 33 = 24-dot double density
+            // Procesar en bandas de 24 líneas de alto
+            byte nL = (byte)(width % 256);
+            byte nH = (byte)(width / 256);
+
+            for (int bandTop = 0; bandTop < height; bandTop += 24)
+            {
+                // Comando ESC * 33 nL nH
+                _commands.Add(new byte[] { 0x1B, 0x2A, 33, nL, nH });
+
+                // 3 bytes por columna (24 dots verticales)
+                byte[] bandData = new byte[width * 3];
+                for (int x = 0; x < width; x++)
+                {
+                    for (int dot = 0; dot < 24; dot++)
+                    {
+                        int y = bandTop + dot;
+                        if (y >= height) break;
+
+                        int byteIndex = y * stride + (x / 8);
+                        bool black = (data[byteIndex] & (0x80 >> (x % 8))) == 0;
+                        if (black)
+                        {
+                            // dot 0-7 → byte 0, dot 8-15 → byte 1, dot 16-23 → byte 2
+                            bandData[x * 3 + dot / 8] |= (byte)(0x80 >> (dot % 8));
+                        }
+                    }
+                }
+                _commands.Add(bandData);
+
+                // Line feed después de cada banda para avanzar exactamente 24 dots
+                _commands.Add(new byte[] { 0x0A });
+            }
+
+            // ESC 2 — Restaurar line spacing al default de la impresora
+            _commands.Add(new byte[] { 0x1B, 0x32 });
+
+            bmp.UnlockBits(bmpData);
+            return this;
+        }
+
         public EscPosCommandBuilder RawBytes(byte[] data)
         {
             if (data != null && data.Length > 0)
