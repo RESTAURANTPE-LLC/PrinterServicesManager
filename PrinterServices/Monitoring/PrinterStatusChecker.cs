@@ -122,24 +122,24 @@ namespace PrinterServices.Monitoring
                     }
                 }
 
-                // ======[ REGLA CLAVE: P:00 O:00 E:00 S:00 = DISPONIBLE ]======
-                // Si todos los bytes DLE son 0x00 después del retry, la impresora NO respondió
-                // al protocolo DLE EOT, pero TCP conectó exitosamente.
-                // DECISIÓN: TCP OK = IMPRESORA DISPONIBLE. DLE EOT es diagnóstico, NO bloqueante.
-                // RAZÓN: Muchas impresoras (TM-T20IIIL, genéricas, etc.) no responden DLE EOT
-                // de forma consistente, pero imprimen perfectamente vía TCP.
-                // NO se debe bloquear la impresión por falta de respuesta DLE.
+                // ======[ REGLA: P:00 O:00 E:00 S:00 = ONLINE pero NO DISPONIBLE ]======
+                // TCP conectó pero DLE EOT no respondió tras retry.
+                // La impresora ESTÁ en la red (online=true) pero NO confirmó ser ESC/POS funcional.
+                // Puede ser: adaptador de red activo con impresora apagada, print server,
+                // dispositivo no-ESC/POS en puerto 9100, o modelo que no soporta DLE EOT.
+                // DECISIÓN: Marcar ONLINE (está en la red) pero NO DISPONIBLE (DLE no confirmó).
+                // PrintWorker verifica DLE EOT antes de imprimir — si falla ahí, reintenta.
                 if (todosEnCero)
                 {
                     status.Online = true;
-                    status.DisponibleParaImprimir = true;
-                    status.TienePapel = true;
+                    status.DisponibleParaImprimir = false;
+                    status.TienePapel = false;
                     status.TapaAbierta = false;
                     status.ErrorRecuperable = false;
-                    status.ErrorMessage = null;
-                    status.RawStatus = "P:00 O:00 E:00 S:00 [TCP_OK_DISPONIBLE]";
+                    status.ErrorMessage = "DLE EOT sin respuesta (TCP OK, impresora no confirmada)";
+                    status.RawStatus = "P:00 O:00 E:00 S:00 [TCP_OK_NO_DLE]";
 
-                    Log.InfoFormat("[STATUS] {0}:{1} → DLE todo cero pero TCP OK — DISPONIBLE para imprimir (raw={2})",
+                    Log.WarnFormat("[STATUS] {0}:{1} → DLE todo cero — ONLINE pero NO DISPONIBLE (raw={2})",
                         ip, port, status.RawStatus);
 
                     return status;
@@ -152,18 +152,19 @@ namespace PrinterServices.Monitoring
 
                 if (!dleResponseValid)
                 {
-                    // DLE respondió algo pero no cumple máscara 0x12 → TCP OK = DISPONIBLE.
-                    // PRINCIPIO: No bloquear impresión por status check ambiguo.
-                    status.DisponibleParaImprimir = true;
-                    status.TienePapel = true;
+                    // DLE respondió algo pero no cumple máscara 0x12 → respuesta ambigua.
+                    // ONLINE (TCP conectó) pero NO DISPONIBLE (DLE no válido).
+                    status.Online = true;
+                    status.DisponibleParaImprimir = false;
+                    status.TienePapel = false;
                     status.TapaAbierta = false;
                     status.ErrorRecuperable = false;
-                    status.ErrorMessage = null;
+                    status.ErrorMessage = "DLE EOT respuesta invalida (TCP OK)";
 
-                    status.RawStatus = string.Format("P:{0:X2} O:{1:X2} E:{2:X2} S:{3:X2} [TCP_OK_DISPONIBLE]",
+                    status.RawStatus = string.Format("P:{0:X2} O:{1:X2} E:{2:X2} S:{3:X2} [TCP_OK_DLE_INVALIDO]",
                         printerByte, offlineByte, errorByte, paperByte);
 
-                    Log.InfoFormat("[STATUS] {0}:{1} → DLE sin respuesta válida pero TCP OK — DISPONIBLE (raw={2})",
+                    Log.WarnFormat("[STATUS] {0}:{1} → DLE invalido — ONLINE pero NO DISPONIBLE (raw={2})",
                         ip, port, status.RawStatus);
 
                     return status;
@@ -281,16 +282,16 @@ namespace PrinterServices.Monitoring
                     }
                 }
 
-                // ======[ REGLA CLAVE: P:00 = DISPONIBLE ]====== (misma lógica que CheckAsync)
+                // ======[ REGLA: P:00 = ONLINE pero NO DISPONIBLE ]====== (misma lógica que CheckAsync)
                 if (todosEnCero)
                 {
                     status.Online = true;
-                    status.DisponibleParaImprimir = true;
-                    status.TienePapel = true;
+                    status.DisponibleParaImprimir = false;
+                    status.TienePapel = false;
                     status.TapaAbierta = false;
                     status.ErrorRecuperable = false;
-                    status.ErrorMessage = null;
-                    status.RawStatus = "P:00 O:00 E:00 S:00 [TCP_OK_DISPONIBLE]";
+                    status.ErrorMessage = "DLE EOT sin respuesta (TCP OK, impresora no confirmada)";
+                    status.RawStatus = "P:00 O:00 E:00 S:00 [TCP_OK_NO_DLE]";
                     return status;
                 }
 
@@ -301,13 +302,14 @@ namespace PrinterServices.Monitoring
 
                 if (!dleResponseValid)
                 {
-                    // TCP OK = DISPONIBLE (misma lógica que CheckAsync)
-                    status.DisponibleParaImprimir = true;
-                    status.TienePapel = true;
+                    // DLE respondió algo pero no cumple máscara 0x12 → ONLINE pero NO DISPONIBLE
+                    status.Online = true;
+                    status.DisponibleParaImprimir = false;
+                    status.TienePapel = false;
                     status.TapaAbierta = false;
                     status.ErrorRecuperable = false;
-                    status.ErrorMessage = null;
-                    status.RawStatus = string.Format("P:{0:X2} O:{1:X2} E:{2:X2} S:{3:X2} [TCP_OK_DISPONIBLE]",
+                    status.ErrorMessage = "DLE EOT respuesta invalida (TCP OK)";
+                    status.RawStatus = string.Format("P:{0:X2} O:{1:X2} E:{2:X2} S:{3:X2} [TCP_OK_DLE_INVALIDO]",
                         printerByte, offlineByte, errorByte, paperByte);
                     return status;
                 }
