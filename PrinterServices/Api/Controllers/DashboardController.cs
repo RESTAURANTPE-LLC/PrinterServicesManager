@@ -23,12 +23,14 @@ namespace PrinterServices.Api.Controllers
         private readonly PrinterServiceDb _db;
         private readonly PrintJobManager _jobManager;
         private readonly ConfigManager _config;
+        private readonly DateTime _serviceStartTime;
 
-        public DashboardController(PrinterServiceDb db, PrintJobManager jobManager, ConfigManager config)
+        public DashboardController(PrinterServiceDb db, PrintJobManager jobManager, ConfigManager config, DateTime serviceStartTime)
         {
             _db = db ?? throw new ArgumentNullException(nameof(db));
             _jobManager = jobManager ?? throw new ArgumentNullException(nameof(jobManager));
             _config = config ?? throw new ArgumentNullException(nameof(config));
+            _serviceStartTime = serviceStartTime;
         }
 
         /// <summary>
@@ -741,8 +743,200 @@ namespace PrinterServices.Api.Controllers
                     jobs = pendingJobs
                 },
                 stats = printStats,
-                recentLatencies = recentLatencies
+                recentLatencies = recentLatencies,
+                system = Workers.SystemInfoCollector.CollectAll(_serviceStartTime),
+                latestSpeed = GetLatestSpeed(),
+                networkDevicesCount = GetNetworkDevicesCount()
             };
+        }
+
+        private object GetLatestSpeed()
+        {
+            try
+            {
+                var latest = _db.Table<Data.Models.NetworkSpeedLogEntity>().OrderByDescending(s => s.MeasuredAt).FirstOrDefault();
+                if (latest == null) return null;
+                return new { downloadSpeedKbps = latest.DownloadSpeedKbps, latencyMs = latest.LatencyMs, measuredAt = latest.MeasuredAt };
+            }
+            catch { return null; }
+        }
+
+        private object GetNetworkDevicesCount()
+        {
+            try
+            {
+                var devices = _db.Table<Data.Models.DeviceOnNetworkEntity>().ToList();
+                return new { total = devices.Count, online = devices.Count(d => d.IsOnline == 1) };
+            }
+            catch { return null; }
+        }
+
+        public void HandleSpeedHistory(HttpListenerContext ctx, int limit)
+        {
+            try
+            {
+                var history = _db.Table<Data.Models.NetworkSpeedLogEntity>().OrderByDescending(s => s.MeasuredAt).Take(limit).ToList();
+                history.Reverse();
+                WriteJsonResponse(ctx, 200, new { count = history.Count, data = history.Select(s => new { s.DownloadSpeedKbps, s.LatencyMs, s.GatewayIp, s.NetworkId, s.MeasuredAt }) });
+            }
+            catch (Exception ex) { WriteJsonResponse(ctx, 500, new { error = ex.Message }); }
+        }
+
+        public void HandleNetworkDevices(HttpListenerContext ctx)
+        {
+            try
+            {
+                var devices = _db.Table<Data.Models.DeviceOnNetworkEntity>().OrderByDescending(d => d.IsOnline).ThenByDescending(d => d.LastSeenAt).ToList();
+                WriteJsonResponse(ctx, 200, new { count = devices.Count, onlineCount = devices.Count(d => d.IsOnline == 1),
+                    data = devices.Select(d => new { ip = d.IpAddress, mac = d.MacAddress, hostname = d.Hostname, vendor = d.Vendor, deviceType = d.DeviceType, isOnline = d.IsOnline == 1, firstSeen = d.FirstSeenAt, lastSeen = d.LastSeenAt, networkId = d.NetworkId, gatewayMac = d.GatewayMac }) });
+            }
+            catch (Exception ex) { WriteJsonResponse(ctx, 500, new { error = ex.Message }); }
+        }
+
+        public void HandleSqlQuery(HttpListenerContext ctx)
+        {
+            try
+            {
+                var remoteIp = ctx.Request.RemoteEndPoint.Address.ToString();
+                if (remoteIp != "127.0.0.1" && remoteIp != "::1" && remoteIp != "0:0:0:0:0:0:0:1")
+                { WriteJsonResponse(ctx, 403, new { error = "Solo accesible desde localhost" }); return; }
+
+                string body;
+                using (var reader = new System.IO.StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
+                    body = reader.ReadToEnd();
+
+                var request = JsonConvert.DeserializeAnonymousType(body, new { query = "", confirmed = false });
+                if (request == null || string.IsNullOrWhiteSpace(request.query))
+                { WriteJsonResponse(ctx, 400, new { error = "Se requiere el campo 'query'" }); return; }
+
+                var query = request.query.Trim();
+                var queryUpper = query.ToUpperInvariant();
+
+                var blacklist = new[] { "DROP TABLE", "DROP INDEX", "ALTER TABLE", "PRAGMA JOURNAL_MODE", "ATTACH", "DETACH" };
+                foreach (var cmd in blacklist)
+                    if (queryUpper.Contains(cmd)) { WriteJsonResponse(ctx, 403, new { error = "Comando no permitido: " + cmd }); return; }
+
+                Log.Info("[SQL-CONSOLE] Ejecutando: " + query);
+                bool isSelect = queryUpper.StartsWith("SELECT") || queryUpper.StartsWith("PRAGMA");
+                bool isWrite = queryUpper.StartsWith("INSERT") || queryUpper.StartsWith("UPDATE") || queryUpper.StartsWith("DELETE") || queryUpper.StartsWith("CREATE");
+
+                if (isWrite && !request.confirmed)
+                { WriteJsonResponse(ctx, 200, new { requiresConfirmation = true, queryType = queryUpper.Split(' ')[0], message = "Confirme para continuar." }); return; }
+
+                if (isSelect)
+                {
+                    // Usar API nativa SQLite3 para queries arbitrarias (PSQLite Query<T> requiere tipo mapeado)
+                    var columns = new List<string>();
+                    var rows = new List<Dictionary<string, object>>();
+                    var stmt = PSQLite.SQLite3.Prepare2(_db.Handle, query);
+                    try
+                    {
+                        int colCount = PSQLite.SQLite3.ColumnCount(stmt);
+                        for (int i = 0; i < colCount; i++)
+                            columns.Add(PSQLite.SQLite3.ColumnName16(stmt, i));
+
+                        while (PSQLite.SQLite3.Step(stmt) == PSQLite.SQLite3.Result.Row && rows.Count < 500)
+                        {
+                            var row = new Dictionary<string, object>();
+                            for (int i = 0; i < colCount; i++)
+                            {
+                                var colType = PSQLite.SQLite3.ColumnType(stmt, i);
+                                object val;
+                                switch (colType)
+                                {
+                                    case PSQLite.SQLite3.ColType.Integer: val = PSQLite.SQLite3.ColumnInt64(stmt, i); break;
+                                    case PSQLite.SQLite3.ColType.Float: val = PSQLite.SQLite3.ColumnDouble(stmt, i); break;
+                                    case PSQLite.SQLite3.ColType.Text: val = System.Runtime.InteropServices.Marshal.PtrToStringUni(PSQLite.SQLite3.ColumnText16(stmt, i)); break;
+                                    case PSQLite.SQLite3.ColType.Null: val = null; break;
+                                    default: val = System.Runtime.InteropServices.Marshal.PtrToStringUni(PSQLite.SQLite3.ColumnText16(stmt, i)); break;
+                                }
+                                row[columns[i]] = val;
+                            }
+                            rows.Add(row);
+                        }
+                    }
+                    finally { PSQLite.SQLite3.Finalize(stmt); }
+                    WriteJsonResponse(ctx, 200, new { success = true, queryType = "SELECT", columns, rows, rowCount = rows.Count, truncated = rows.Count >= 500 });
+                }
+                else
+                {
+                    int affected = _db.Execute(query);
+                    WriteJsonResponse(ctx, 200, new { success = true, queryType = queryUpper.Split(' ')[0], rowsAffected = affected });
+                }
+            }
+            catch (Exception ex) { WriteJsonResponse(ctx, 200, new { success = false, error = ex.Message }); }
+        }
+
+        public void HandleUpdateRequest(HttpListenerContext ctx)
+        {
+            try
+            {
+                string body; using (var reader = new System.IO.StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding)) body = reader.ReadToEnd();
+                string serverIp = FindQuipuNetXIp();
+                if (serverIp == null) { WriteJsonResponse(ctx, 503, new { error = "No se pudo determinar IP de QuipuNetX" }); return; }
+                var request = (HttpWebRequest)WebRequest.Create("http://" + serverIp + ":8081/api/health/update-printer-service");
+                request.Method = "POST"; request.ContentType = "application/json"; request.Timeout = 10000;
+                var bodyBytes = Encoding.UTF8.GetBytes(body); request.ContentLength = bodyBytes.Length;
+                using (var rs = request.GetRequestStream()) rs.Write(bodyBytes, 0, bodyBytes.Length);
+                using (var response = (HttpWebResponse)request.GetResponse()) using (var sr = new System.IO.StreamReader(response.GetResponseStream()))
+                    WriteRawJsonResponse(ctx, (int)response.StatusCode, sr.ReadToEnd());
+            }
+            catch (WebException wex) { WriteJsonResponse(ctx, 503, new { error = "QuipuNetX no disponible: " + wex.Message }); }
+            catch (Exception ex) { WriteJsonResponse(ctx, 500, new { error = ex.Message }); }
+        }
+
+        public void HandleUpdateStatus(HttpListenerContext ctx)
+        {
+            try
+            {
+                string serverIp = FindQuipuNetXIp(); if (serverIp == null) { WriteJsonResponse(ctx, 503, new { error = "No se pudo determinar IP" }); return; }
+                var request = (HttpWebRequest)WebRequest.Create("http://" + serverIp + ":8081/api/health/update-printer-service-status"); request.Method = "GET"; request.Timeout = 5000;
+                using (var response = (HttpWebResponse)request.GetResponse()) using (var sr = new System.IO.StreamReader(response.GetResponseStream()))
+                    WriteRawJsonResponse(ctx, (int)response.StatusCode, sr.ReadToEnd());
+            }
+            catch (Exception ex) { WriteJsonResponse(ctx, 503, new { error = "QuipuNetX no disponible: " + ex.Message }); }
+        }
+
+        public void HandleQuipuNetHealth(HttpListenerContext ctx)
+        {
+            try
+            {
+                string serverIp = FindQuipuNetXIp(); if (serverIp == null) { WriteJsonResponse(ctx, 503, new { error = "No se pudo determinar IP" }); return; }
+                var request = (HttpWebRequest)WebRequest.Create("http://" + serverIp + ":8081/api/health/status"); request.Method = "GET"; request.Timeout = 5000;
+                using (var response = (HttpWebResponse)request.GetResponse()) using (var sr = new System.IO.StreamReader(response.GetResponseStream()))
+                    WriteRawJsonResponse(ctx, (int)response.StatusCode, sr.ReadToEnd());
+            }
+            catch (Exception ex) { WriteJsonResponse(ctx, 503, new { error = "QuipuNetX no disponible: " + ex.Message }); }
+        }
+
+        public void HandleQuipuNetScreenshot(HttpListenerContext ctx)
+        {
+            try
+            {
+                string serverIp = FindQuipuNetXIp(); if (serverIp == null) { WriteJsonResponse(ctx, 503, new { error = "No se pudo determinar IP" }); return; }
+                var request = (HttpWebRequest)WebRequest.Create("http://" + serverIp + ":8081/api/health/screenshot"); request.Method = "GET"; request.Timeout = 15000;
+                using (var response = (HttpWebResponse)request.GetResponse()) using (var sr = new System.IO.StreamReader(response.GetResponseStream()))
+                    WriteRawJsonResponse(ctx, (int)response.StatusCode, sr.ReadToEnd());
+            }
+            catch (Exception ex) { WriteJsonResponse(ctx, 503, new { error = "QuipuNetX no disponible: " + ex.Message }); }
+        }
+
+        private string FindQuipuNetXIp()
+        {
+            try { var lj = _db.Table<Data.Models.PrintJobEntity>().OrderByDescending(j => j.FechaCreacion).FirstOrDefault(); if (lj != null && !string.IsNullOrEmpty(lj.IpServidor)) return lj.IpServidor; } catch { }
+            return "127.0.0.1";
+        }
+
+        private void WriteRawJsonResponse(HttpListenerContext ctx, int statusCode, string json)
+        {
+            try { var buffer = Encoding.UTF8.GetBytes(json); ctx.Response.ContentType = "application/json; charset=utf-8"; ctx.Response.StatusCode = statusCode; ctx.Response.ContentLength64 = buffer.Length; ctx.Response.OutputStream.Write(buffer, 0, buffer.Length); ctx.Response.Close(); }
+            catch (HttpListenerException) { try { ctx.Response.Close(); } catch { } }
+        }
+
+        public void WriteJsonResponse(HttpListenerContext ctx, int statusCode, object data)
+        {
+            try { var json = JsonConvert.SerializeObject(data); var buffer = Encoding.UTF8.GetBytes(json); ctx.Response.ContentType = "application/json; charset=utf-8"; ctx.Response.StatusCode = statusCode; ctx.Response.ContentLength64 = buffer.Length; ctx.Response.OutputStream.Write(buffer, 0, buffer.Length); ctx.Response.Close(); }
+            catch (HttpListenerException) { try { ctx.Response.Close(); } catch { } }
         }
     }
 }

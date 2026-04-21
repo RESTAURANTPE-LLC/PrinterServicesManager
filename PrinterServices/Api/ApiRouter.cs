@@ -10,6 +10,7 @@ using PrinterServices.Config;
 using PrinterServices.Data;
 using PrinterServices.Queue;
 
+
 namespace PrinterServices.Api
 {
     public class ApiResult
@@ -48,6 +49,9 @@ namespace PrinterServices.Api
     {
         private static readonly ILog Log = LogManager.GetLogger(typeof(ApiRouter));
 
+        public static NetworkSpeedWorker SpeedWorker { get; set; }
+        public static NetworkDiscoveryWorker DiscoveryWorker { get; set; }
+
         private readonly HealthController _healthController;
         private readonly PrintController _printController;
         private readonly JobController _jobController;
@@ -63,7 +67,7 @@ namespace PrinterServices.Api
             _jobController = new JobController(jobManager);
             _printerController = new PrinterController(db);
             _configController = new ConfigController(configManager);
-            _dashboardController = new DashboardController(db, jobManager, configManager);
+            _dashboardController = new DashboardController(db, jobManager, configManager, DateTime.Now);
             _networkController = new NetworkController();
         }
 
@@ -261,6 +265,15 @@ namespace PrinterServices.Api
             {
                 return null; // Ruta especial: reporte de conectividad de impresoras
             }
+            if (method == "POST" && path == "/api/dashboard/sql") { return null; }
+            if (method == "GET" && path.StartsWith("/api/dashboard/speed-history")) { return null; }
+            if (method == "POST" && path == "/api/dashboard/speed-measure") { return null; }
+            if (method == "GET" && path.StartsWith("/api/dashboard/network-devices")) { return null; }
+            if (method == "POST" && path == "/api/dashboard/network-scan") { return null; }
+            if (method == "POST" && path == "/api/dashboard/update") { return null; }
+            if (method == "GET" && path == "/api/dashboard/update-status") { return null; }
+            if (method == "GET" && path == "/api/dashboard/quipunet-health") { return null; }
+            if (method == "GET" && path == "/api/dashboard/quipunet-screenshot") { return null; }
 
             // ── Printer IP Reset (cross-subnet) ──
             if (method == "GET" && path == "/api/printer/resetip")
@@ -397,6 +410,17 @@ namespace PrinterServices.Api
                 _dashboardController.HandleConnectivityReport(ctx, page, limit, impresoraId);
                 return;
             }
+
+            // ── Health Dashboard routes ──
+            if (method == "POST" && path == "/api/dashboard/sql") { _dashboardController.HandleSqlQuery(ctx); return; }
+            if (method == "GET" && path.StartsWith("/api/dashboard/speed-history")) { var q=ctx.Request.QueryString; int lim=48; if(!string.IsNullOrEmpty(q["limit"])) int.TryParse(q["limit"],out lim); _dashboardController.HandleSpeedHistory(ctx,lim); return; }
+            if (method == "POST" && path == "/api/dashboard/speed-measure") { if(SpeedWorker!=null){SpeedWorker.MeasureNow();_dashboardController.WriteJsonResponse(ctx,200,new{status="OK"});}else{_dashboardController.WriteJsonResponse(ctx,503,new{error="SpeedWorker no disponible"});} return; }
+            if (method == "GET" && path.StartsWith("/api/dashboard/network-devices")) { _dashboardController.HandleNetworkDevices(ctx); return; }
+            if (method == "POST" && path == "/api/dashboard/network-scan") { if(DiscoveryWorker!=null){DiscoveryWorker.ScanNow();_dashboardController.HandleNetworkDevices(ctx);}else{_dashboardController.WriteJsonResponse(ctx,503,new{error="DiscoveryWorker no disponible"});} return; }
+            if (method == "POST" && path == "/api/dashboard/update") { _dashboardController.HandleUpdateRequest(ctx); return; }
+            if (method == "GET" && path == "/api/dashboard/update-status") { _dashboardController.HandleUpdateStatus(ctx); return; }
+            if (method == "GET" && path == "/api/dashboard/quipunet-health") { _dashboardController.HandleQuipuNetHealth(ctx); return; }
+            if (method == "GET" && path == "/api/dashboard/quipunet-screenshot") { _dashboardController.HandleQuipuNetScreenshot(ctx); return; }
 
             // Si llegamos aquí, no es ruta especial
             ctx.Response.StatusCode = 404;

@@ -583,15 +583,23 @@ namespace PrinterServices.Monitoring
                 }
                 catch (Exception ex)
                 {
-                    // Error inesperado al verificar impresora (timeout, socket exception, etc.)
-                    // Esto indica problema de red o configuración, NO intento de auto-resolución aquí
-                    printer.EstadoOnline = 0; // Marcar OFFLINE
-                    printer.DisponibleParaImprimir = 0; // No disponible
-                    printer.UltimoCheck = DateTime.Now.ToString("o");
-                    try { _db.Update(printer); } catch { }
+                    // Error inesperado en el ciclo de verificación (UNIQUE constraint en MAC,
+                    // timeout, socket exception, etc.). NO forzamos EstadoOnline=0 aquí —
+                    // si el error ocurre DESPUÉS del check exitoso y del UPDATE de estado,
+                    // resetear a 0 genera flapping falso (el siguiente ciclo registraría
+                    // OFFLINE→ONLINE aunque la impresora nunca se cayó). Dejamos que StatusMonitor
+                    // corrija el estado en el próximo ciclo con una verificación limpia.
+                    // Solo actualizamos ultimo_check via UPDATE selectivo para no pisar otros campos.
+                    try
+                    {
+                        _db.Execute(
+                            "UPDATE printers SET ultimo_check = ? WHERE impresora_id = ?",
+                            DateTime.Now.ToString("o"), printer.ImpresoraId);
+                    }
+                    catch { /* secundario: no romper el loop si falla también */ }
 
                     Log.WarnFormat("[MONITOR] ✗ {0} ({1}) ERROR al verificar: {2}",
-                        printer.Nombre ?? printer.ImpresoraId, printer.Ip, ex.Message);
+                        printer.Nombre ?? printer.ImpresoraId, printer.Ip, ex);
                 }
             }
         }

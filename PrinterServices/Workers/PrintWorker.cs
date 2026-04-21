@@ -396,8 +396,9 @@ namespace PrinterServices.Workers
 
             IPrinterDriver driver = DriverFactory.GetDriver(job.PrinterModel);
 
-            // Construir payload ESC/POS
-            byte[] payload = BuildPayload(driver, job);
+            // Construir payload ESC/POS (incluye ms estimados de impresión física cuando hay bitmap)
+            BuiltPayload built = BuildPayload(driver, job);
+            byte[] payload = built.Data;
 
             // Guard: Registrar hash ANTES de enviar bytes (protege contra crash post-impresión)
             string contentHash = PrintJobManager.CalculateContentHash(job);
@@ -411,7 +412,7 @@ namespace PrinterServices.Workers
                     Log.DebugFormat("[WORKER] Job {0} — copia {1}/{2}", job.JobId, copia + 1, job.Copias);
                 }
 
-                bool sent = await SendWithRetryInstrumented(job, payload, effectiveIp, port, ct, copia == 0 ? timingBuilder : null);
+                bool sent = await SendWithRetryInstrumented(job, payload, effectiveIp, port, ct, copia == 0 ? timingBuilder : null, built.EstimatedWaitMs);
                 if (!sent)
                 {
                     // FASE 8: Registrar fallo en timing
@@ -456,8 +457,10 @@ namespace PrinterServices.Workers
             _callbackNotifier.NotifyStatusChangeFireAndForget(job, "DONE");
         }
 
-        private byte[] BuildPayload(IPrinterDriver driver, PrintJob job)
+        private BuiltPayload BuildPayload(IPrinterDriver driver, PrintJob job)
         {
+            int estimatedWaitMs = 0;
+
             // ─── PRIORIDAD 0.5: DISEÑADOR VISUAL (ComandaDocument con prioridad absoluta) ───
             // Si el flag está activo, usa ComandaDocument para generar el ticket renderizado como bitmap.
             // Tiene PRIORIDAD sobre lineasimprimir (modo LINEAS) para forzar el uso del diseñador visual.
@@ -472,7 +475,7 @@ namespace PrinterServices.Workers
                     {
                         Log.InfoFormat("[WORKER] Job {0} — modo DISEÑADOR_VISUAL ({1}→{2} líneas→bitmap)",
                             job.JobId, job.Documento.GetType().Name, renderLines.Count);
-                        
+
                         var builder = new EscPosCommandBuilder(driver);
                         builder.Init();
 
@@ -481,6 +484,7 @@ namespace PrinterServices.Workers
                         using (Bitmap resized = BitmapResizer.ResizeIfNeeded(bmp, 576))
                         {
                             AddBitmapByEmulation(builder, resized);
+                            estimatedWaitMs = PrintDurationEstimator.EstimateMs(resized);
                         }
 
                         if (job.AbreGaveta)
@@ -489,7 +493,7 @@ namespace PrinterServices.Workers
                         }
 
                         builder.Cut(CutType.Partial);
-                        return builder.Build();
+                        return new BuiltPayload { Data = builder.Build(), EstimatedWaitMs = estimatedWaitMs };
                     }
                     else
                     {
@@ -516,7 +520,7 @@ namespace PrinterServices.Workers
                 if (lineas.Count > 0)
                 {
                     Log.DebugFormat("[WORKER] Job {0} — modo LINEAS ({1} líneas)", job.JobId, lineas.Count);
-                    return LineaParser.BuildFromLineas(driver, lineas);
+                    return new BuiltPayload { Data = LineaParser.BuildFromLineas(driver, lineas), EstimatedWaitMs = 0 };
                 }
             }
 
@@ -542,6 +546,7 @@ namespace PrinterServices.Workers
                     using (Bitmap resized = BitmapResizer.ResizeIfNeeded(bmp, 576))
                     {
                         AddBitmapByEmulation(builder, resized);
+                        estimatedWaitMs = PrintDurationEstimator.EstimateMs(resized);
                     }
 
                     if (job.AbreGaveta)
@@ -550,7 +555,7 @@ namespace PrinterServices.Workers
                     }
 
                     builder.Cut(CutType.Partial);
-                    return builder.Build();
+                    return new BuiltPayload { Data = builder.Build(), EstimatedWaitMs = estimatedWaitMs };
                 }
             }
 
@@ -583,6 +588,7 @@ namespace PrinterServices.Workers
                 using (Bitmap resized = BitmapResizer.ResizeIfNeeded(bmp, 576))
                 {
                     AddBitmapByEmulation(builder, resized);
+                    estimatedWaitMs = PrintDurationEstimator.EstimateMs(resized);
                 }
 
                 if (job.AbreGaveta)
@@ -591,7 +597,7 @@ namespace PrinterServices.Workers
                 }
 
                 builder.Cut(CutType.Partial);
-                return builder.Build();
+                return new BuiltPayload { Data = builder.Build(), EstimatedWaitMs = estimatedWaitMs };
             }
 
             // Modo tradicional: cadena de texto plano
@@ -667,7 +673,18 @@ namespace PrinterServices.Workers
             // Corte
             textBuilder.Cut(CutType.Partial);
 
-            return textBuilder.Build();
+            return new BuiltPayload { Data = textBuilder.Build(), EstimatedWaitMs = 0 };
+        }
+
+        /// <summary>
+        /// Resultado de BuildPayload: bytes ESC/POS + ms estimados que la impresora necesita
+        /// para imprimir físicamente (solo > 0 cuando el payload incluye un bitmap).
+        /// Se usa para esperar post-send y evitar que el siguiente job pise al actual.
+        /// </summary>
+        private struct BuiltPayload
+        {
+            public byte[] Data;
+            public int EstimatedWaitMs;
         }
 
         /// <summary>
@@ -742,7 +759,8 @@ namespace PrinterServices.Workers
             Log.DebugFormat("[WORKER] Driver USB seleccionado: {0} para modelo {1}",
                 driver.ModelName, job.PrinterModel ?? "null");
 
-            byte[] payload = BuildPayload(driver, job);
+            BuiltPayload built = BuildPayload(driver, job);
+            byte[] payload = built.Data;
 
             // Guard: Registrar hash ANTES de enviar bytes (protege contra crash post-impresión) — flujo USB
             string contentHash = PrintJobManager.CalculateContentHash(job);
@@ -757,7 +775,7 @@ namespace PrinterServices.Workers
                 }
 
                 bool sent = await SendUsbWithRetry(job, payload, usbUniqueKey, ct,
-                    copia == 0 ? timingBuilder : null);
+                    copia == 0 ? timingBuilder : null, built.EstimatedWaitMs);
                 if (!sent)
                 {
                     if (copia == 0)
@@ -798,9 +816,12 @@ namespace PrinterServices.Workers
         /// <summary>
         /// Envía payload a impresora USB con reintentos exponenciales.
         /// Análogo a SendWithRetryInstrumented pero usando UsbTransport.
+        /// estimatedWaitMs: ms a esperar tras el send para que la impresora termine de imprimir
+        /// físicamente antes de liberar el worker (previene cruce de tickets con mucho negro).
         /// </summary>
         private async Task<bool> SendUsbWithRetry(PrintJob job, byte[] payload,
-            string usbUniqueKey, CancellationToken ct, LatencyTiming.Builder timingBuilder)
+            string usbUniqueKey, CancellationToken ct, LatencyTiming.Builder timingBuilder,
+            int estimatedWaitMs)
         {
             var cfg = ConfigManager.Instance;
             int maxRetries = cfg.GetInt("MaxRetries", 3);
@@ -838,6 +859,8 @@ namespace PrinterServices.Workers
 
                         Log.DebugFormat("[WORKER] Job USB {0} — datos enviados ({1} bytes) via {2}",
                             job.JobId, payload.Length, usbUniqueKey);
+
+                        await WaitForPhysicalPrintAsync(job, estimatedWaitMs, "USB", ct);
                         return true;
                     }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -864,8 +887,10 @@ namespace PrinterServices.Workers
         /// <summary>
         /// Envía payload a la impresora con reintentos exponenciales.
         /// RAZÓN: Recibe effectiveIp y port ya resueltos por MAC (no confiar en job.ImpresoraIp que puede estar desactualizada).
+        /// estimatedWaitMs: ms a esperar tras el send para que la impresora termine de imprimir
+        /// físicamente antes de liberar el worker (previene cruce de tickets con mucho negro).
         /// </summary>
-        private async Task<bool> SendWithRetryInstrumented(PrintJob job, byte[] payload, string effectiveIp, int port, CancellationToken ct, LatencyTiming.Builder timingBuilder)
+        private async Task<bool> SendWithRetryInstrumented(PrintJob job, byte[] payload, string effectiveIp, int port, CancellationToken ct, LatencyTiming.Builder timingBuilder, int estimatedWaitMs)
         {
             var cfg = ConfigManager.Instance;
             int maxRetries = cfg.GetInt("MaxRetries", 3);
@@ -904,6 +929,8 @@ namespace PrinterServices.Workers
                         transport.Disconnect();
 
                         Log.DebugFormat("[WORKER] Job {0} — datos enviados ({1} bytes)", job.JobId, payload.Length);
+
+                        await WaitForPhysicalPrintAsync(job, estimatedWaitMs, "TCP", ct);
                         return true;
                     }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -925,6 +952,29 @@ namespace PrinterServices.Workers
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Espera proporcional al negro del bitmap para que la impresora térmica termine de
+        /// imprimir físicamente antes de liberar al worker y permitir el siguiente job.
+        /// RAZÓN: SendAsync devuelve cuando los bytes salen por TCP/USB, no cuando el papel
+        /// salió. Si el siguiente job arranca antes, su ESC @ (Init) reinicia la impresora
+        /// y corta el ticket anterior a la mitad, cruzándolo con el nuevo.
+        /// El ms estimado viene de PrintDurationEstimator (height + densidad de negro por fila),
+        /// clampeado por PostPrintWaitMin/MaxMs. Se respeta CancellationToken para shutdown.
+        /// </summary>
+        private async Task WaitForPhysicalPrintAsync(PrintJob job, int estimatedWaitMs, string transportLabel, CancellationToken ct)
+        {
+            if (estimatedWaitMs <= 0) return;
+
+            var cfg = ConfigManager.Instance;
+            if (!cfg.GetBool("PostPrintWaitEnabled", true)) return;
+
+            Log.DebugFormat("[WORKER] Job {0} — wait post-send {1}ms ({2}) para que impresora termine físicamente",
+                job.JobId, estimatedWaitMs, transportLabel);
+
+            try { await Task.Delay(estimatedWaitMs, ct); }
+            catch (OperationCanceledException) { /* shutdown: salir sin loguear como error */ }
         }
 
         private void HandleFailure(PrintJob job, string error)

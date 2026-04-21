@@ -96,7 +96,10 @@ namespace PrinterServices.Api.Controllers
                 if (json["modelo"] != null)
                     printer.Modelo = json.Value<string>("modelo");
 
-                _db.Update(printer);
+                // UPDATE selectivo: no pisar estado operativo de StatusMonitor (estado_online, etc).
+                _db.Execute(
+                    "UPDATE printers SET nombre = ?, ip = ?, puerto = ?, modelo = ? WHERE impresora_id = ?",
+                    printer.Nombre, printer.Ip, printer.Puerto, printer.Modelo, printer.ImpresoraId);
 
                 Log.InfoFormat("======[ PRINTER EDIT ]====== {0} actualizada desde dashboard: ip={1} puerto={2} nombre={3}",
                     impresoraId, printer.Ip, printer.Puerto, printer.Nombre);
@@ -251,17 +254,27 @@ namespace PrinterServices.Api.Controllers
                             macDuplicate.Modelo = GetString(json, "modelo") ?? GetString(json, "printermodel") ?? macDuplicate.Modelo;
                             macDuplicate.ModoImpresion = GetString(json, "modo_impresion") ?? macDuplicate.ModoImpresion;
                             if (existing.Puerto > 0) macDuplicate.Puerto = existing.Puerto;
-                            _db.Update(macDuplicate);
-                            // Quitar la MAC del registro actual para evitar duplicado
+                            // UPDATE selectivo: no tocar estado operativo de StatusMonitor.
+                            _db.Execute(
+                                "UPDATE printers SET ip = ?, nombre = ?, modelo = ?, modo_impresion = ?, puerto = ? WHERE impresora_id = ?",
+                                macDuplicate.Ip, macDuplicate.Nombre, macDuplicate.Modelo, macDuplicate.ModoImpresion, macDuplicate.Puerto, macDuplicate.ImpresoraId);
+                            // Quitar la MAC del registro actual para evitar duplicado (UPDATE selectivo)
+                            _db.Execute(
+                                "UPDATE printers SET mac_address = NULL WHERE impresora_id = ?",
+                                existing.ImpresoraId);
                             existing.MacAddress = null;
-                            _db.Update(existing);
                             Log.WarnFormat("[PRINTER] MAC {0} ya registrada en {1} ({2}) → datos actualizados. Se quitó MAC de {3}",
                                 macDuplicate.MacAddress, macDuplicate.ImpresoraId, macDuplicate.Nombre, impresoraId);
                             return ApiResult.Ok(JsonConvert.SerializeObject(new { status = "UPDATED_BY_MAC", impresoraId = macDuplicate.ImpresoraId }));
                         }
                     }
 
-                    _db.Update(existing);
+                    // UPDATE selectivo: no tocar estado operativo de StatusMonitor.
+                    _db.Execute(
+                        "UPDATE printers SET ip = ?, nombre = ?, modelo = ?, modo_impresion = ?, mac_address = ?, puerto = ?, tipo_conexion = ?, usb_unique_key = ?, usb_device_path = ?, usb_friendly_name = ? WHERE impresora_id = ?",
+                        existing.Ip, existing.Nombre, existing.Modelo, existing.ModoImpresion, existing.MacAddress, existing.Puerto,
+                        existing.TipoConexion, existing.UsbUniqueKey, existing.UsbDevicePath, existing.UsbFriendlyName,
+                        existing.ImpresoraId);
 
                     Log.InfoFormat("[PRINTER] Impresora actualizada: {0} ({1}) en {2}", impresoraId, existing.Nombre, ip);
                     return ApiResult.Ok(JsonConvert.SerializeObject(new { status = "UPDATED", impresoraId = impresoraId }));
@@ -309,7 +322,10 @@ namespace PrinterServices.Api.Controllers
                             macDuplicate.Modelo = printer.Modelo ?? macDuplicate.Modelo;
                             macDuplicate.ModoImpresion = printer.ModoImpresion ?? macDuplicate.ModoImpresion;
                             if (printer.Puerto > 0) macDuplicate.Puerto = printer.Puerto;
-                            _db.Update(macDuplicate);
+                            // UPDATE selectivo: no tocar estado operativo de StatusMonitor.
+                            _db.Execute(
+                                "UPDATE printers SET ip = ?, nombre = ?, modelo = ?, modo_impresion = ?, puerto = ? WHERE impresora_id = ?",
+                                macDuplicate.Ip, macDuplicate.Nombre, macDuplicate.Modelo, macDuplicate.ModoImpresion, macDuplicate.Puerto, macDuplicate.ImpresoraId);
                             Log.WarnFormat("[PRINTER] MAC {0} ya registrada en {1} ({2}) → datos actualizados con info de {3}",
                                 macDuplicate.MacAddress, macDuplicate.ImpresoraId, macDuplicate.Nombre, impresoraId);
                             return ApiResult.Ok(JsonConvert.SerializeObject(new { status = "UPDATED_BY_MAC", impresoraId = macDuplicate.ImpresoraId }));
@@ -405,133 +421,157 @@ namespace PrinterServices.Api.Controllers
                 // Procesar cada impresora del batch ya deduplicado
                 foreach (var dto in dedupedPrinters)
                 {
-                    // Validar campos obligatorios
-                    if (string.IsNullOrEmpty(dto.impresora_id))
+                    try
                     {
-                        Log.WarnFormat("[PRINTER-SYNC] Impresora sin ID, ignorando"); // Loguear warning
-                        continue; // Saltar a la siguiente impresora
-                    }
-
-                    if (string.IsNullOrEmpty(dto.ip))
-                    {
-                        Log.WarnFormat("[PRINTER-SYNC] Impresora {0} sin IP, ignorando", dto.impresora_id); // Loguear warning
-                        continue; // Saltar a la siguiente impresora
-                    }
-
-                    // Verificar si la impresora ya existe en la BD (por impresora_id)
-                    var existing = _db.Query<PrinterEntity>(
-                        "SELECT * FROM printers WHERE impresora_id = ?", dto.impresora_id).FirstOrDefault();
-
-                    if (existing != null)
-                    {
-                        // ═══════════════════════════════════════════════════════
-                        // ACTUALIZAR impresora existente
-                        // ═══════════════════════════════════════════════════════
-                        // IP: Solo actualizar si la impresora está OFFLINE en PrinterServices.
-                        // Si está ONLINE, la IP actual fue confirmada por la capa de red (StatusMonitor/ARP)
-                        // y es más confiable que la IP que QuipuNet envía (puede estar desactualizada).
-                        if (existing.EstadoOnline != 1 && !string.IsNullOrEmpty(dto.ip))
+                        // Validar campos obligatorios
+                        if (string.IsNullOrEmpty(dto.impresora_id))
                         {
-                            existing.Ip = dto.ip;
+                            Log.WarnFormat("[PRINTER-SYNC] Impresora sin ID, ignorando"); // Loguear warning
+                            continue; // Saltar a la siguiente impresora
                         }
-                        else if (!string.IsNullOrEmpty(dto.ip) && dto.ip != existing.Ip)
-                        {
-                            Log.InfoFormat("======[ SYNC IP IGNORADA ]====== {0} está ONLINE en {1}, QuipuNet envió {2} — se mantiene IP actual",
-                                existing.Nombre ?? existing.ImpresoraId, existing.Ip, dto.ip);
-                        }
-                        existing.Nombre = dto.nombre ?? existing.Nombre; // Actualizar nombre (si viene)
-                        existing.Puerto = dto.puerto > 0 ? dto.puerto : existing.Puerto; // Actualizar puerto (si viene > 0)
-                        // MAC: Solo actualizar si la impresora NO tiene MAC aún (primera vez).
-                        // Una vez asignada, la MAC es inmutable (identificador de hardware).
-                        if (string.IsNullOrEmpty(existing.MacAddress) && !string.IsNullOrEmpty(dto.mac_address))
-                        {
-                            existing.MacAddress = dto.mac_address;
-                        }
-                        // NOTA: NO actualizar estado online/offline - eso lo maneja StatusMonitor
 
-                        // Dedup por MAC: si otra impresora ya tiene la misma MAC, es el mismo dispositivo físico
-                        // → actualizar los datos de la impresora existente (no duplicar, no eliminar)
-                        if (!string.IsNullOrEmpty(existing.MacAddress))
+                        if (string.IsNullOrEmpty(dto.ip))
                         {
-                            var macDuplicate = _db.Query<PrinterEntity>(
-                                "SELECT * FROM printers WHERE mac_address = ? AND impresora_id != ?",
-                                existing.MacAddress, dto.impresora_id).FirstOrDefault();
-                            if (macDuplicate != null)
+                            Log.WarnFormat("[PRINTER-SYNC] Impresora {0} sin IP, ignorando", dto.impresora_id); // Loguear warning
+                            continue; // Saltar a la siguiente impresora
+                        }
+
+                        // Verificar si la impresora ya existe en la BD (por impresora_id)
+                        var existing = _db.Query<PrinterEntity>(
+                            "SELECT * FROM printers WHERE impresora_id = ?", dto.impresora_id).FirstOrDefault();
+
+                        if (existing != null)
+                        {
+                            // ═══════════════════════════════════════════════════════
+                            // ACTUALIZAR impresora existente
+                            // ═══════════════════════════════════════════════════════
+                            // IP: Solo actualizar si la impresora está OFFLINE en PrinterServices.
+                            // Si está ONLINE, la IP actual fue confirmada por la capa de red (StatusMonitor/ARP)
+                            // y es más confiable que la IP que QuipuNet envía (puede estar desactualizada).
+                            if (existing.EstadoOnline != 1 && !string.IsNullOrEmpty(dto.ip))
                             {
-                                // Actualizar la impresora que ya tiene esa MAC — IP solo si está OFFLINE
-                                if (macDuplicate.EstadoOnline != 1 && !string.IsNullOrEmpty(dto.ip))
-                                {
-                                    macDuplicate.Ip = dto.ip;
-                                }
-                                macDuplicate.Nombre = dto.nombre ?? macDuplicate.Nombre;
-                                macDuplicate.Puerto = dto.puerto > 0 ? dto.puerto : macDuplicate.Puerto;
-                                _db.Update(macDuplicate);
-                                // Quitar la MAC del registro actual para evitar duplicado
-                                existing.MacAddress = null;
-                                _db.Update(existing);
-                                Log.WarnFormat("[PRINTER-SYNC] MAC {0} ya registrada en {1} ({2}) → datos actualizados. Se quitó MAC de {3}",
-                                    macDuplicate.MacAddress, macDuplicate.ImpresoraId, macDuplicate.Nombre, dto.impresora_id);
-                                updatedCount++;
-                                continue; // Ya se procesó, saltar al siguiente
+                                existing.Ip = dto.ip;
                             }
-                        }
-
-                        _db.Update(existing); // Ejecutar UPDATE en BD
-                        updatedCount++; // Incrementar contador de actualizados
-
-                        Log.DebugFormat("[PRINTER-SYNC] Actualizada: {0} ({1}) → {2}", 
-                            dto.impresora_id, dto.nombre, dto.ip); // Log de actualización
-                    }
-                    else
-                    {
-                        // ═══════════════════════════════════════════════════════
-                        // INSERTAR impresora nueva
-                        // ═══════════════════════════════════════════════════════
-                        var newPrinter = new PrinterEntity
-                        {
-                            ImpresoraId = dto.impresora_id, // Asignar ID
-                            Nombre = dto.nombre ?? dto.impresora_id, // Asignar nombre (default = ID)
-                            Ip = dto.ip, // Asignar IP
-                            Puerto = dto.puerto > 0 ? dto.puerto : 9100, // Puerto (default 9100)
-                            MacAddress = dto.mac_address, // Asignar MAC
-                            ModoImpresion = "ethernet", // Default: ethernet (QuipuNetX envía solo modo SERVICIO = ethernet)
-                            FechaRegistro = DateTime.Now.ToString("o"), // Timestamp ISO 8601
-                            EstadoOnline = 0, // Default: offline (StatusMonitor lo actualizará)
-                            TienePapel = 1, // Default: asumimos que tiene papel
-                            TapaAbierta = 0, // Default: asumimos tapa cerrada
-                            IpResueltaPorArp = 0 // Default: no resuelta por ARP
-                        };
-
-                        // Dedup por MAC: si otra impresora ya tiene la misma MAC, es el mismo dispositivo físico
-                        // → actualizar los datos de la impresora existente (no duplicar, no eliminar)
-                        if (!string.IsNullOrEmpty(newPrinter.MacAddress))
-                        {
-                            var macDuplicate = _db.Query<PrinterEntity>(
-                                "SELECT * FROM printers WHERE mac_address = ? AND impresora_id != ?",
-                                newPrinter.MacAddress, dto.impresora_id).FirstOrDefault();
-                            if (macDuplicate != null)
+                            else if (!string.IsNullOrEmpty(dto.ip) && dto.ip != existing.Ip)
                             {
-                                // Actualizar la impresora que ya tiene esa MAC — IP solo si está OFFLINE
-                                if (macDuplicate.EstadoOnline != 1 && !string.IsNullOrEmpty(dto.ip))
-                                {
-                                    macDuplicate.Ip = dto.ip;
-                                }
-                                macDuplicate.Nombre = dto.nombre ?? macDuplicate.Nombre;
-                                macDuplicate.Puerto = dto.puerto > 0 ? dto.puerto : macDuplicate.Puerto;
-                                _db.Update(macDuplicate);
-                                Log.WarnFormat("[PRINTER-SYNC] MAC {0} ya registrada en {1} ({2}) → datos actualizados con info de {3}",
-                                    macDuplicate.MacAddress, macDuplicate.ImpresoraId, macDuplicate.Nombre, dto.impresora_id);
-                                updatedCount++;
-                                continue; // No insertar, ya se actualizó la existente
+                                Log.InfoFormat("======[ SYNC IP IGNORADA ]====== {0} está ONLINE en {1}, QuipuNet envió {2} — se mantiene IP actual",
+                                    existing.Nombre ?? existing.ImpresoraId, existing.Ip, dto.ip);
                             }
+                            existing.Nombre = dto.nombre ?? existing.Nombre; // Actualizar nombre (si viene)
+                            existing.Puerto = dto.puerto > 0 ? dto.puerto : existing.Puerto; // Actualizar puerto (si viene > 0)
+                                                                                             // MAC: Solo actualizar si la impresora NO tiene MAC aún (primera vez).
+                                                                                             // Una vez asignada, la MAC es inmutable (identificador de hardware).
+                            if (string.IsNullOrEmpty(existing.MacAddress) && !string.IsNullOrEmpty(dto.mac_address))
+                            {
+                                existing.MacAddress = dto.mac_address;
+                            }
+                            // NOTA: NO actualizar estado online/offline - eso lo maneja StatusMonitor
+
+                            // Dedup por MAC: si otra impresora ya tiene la misma MAC, es el mismo dispositivo físico
+                            // → actualizar los datos de la impresora existente (no duplicar, no eliminar)
+                            if (!string.IsNullOrEmpty(existing.MacAddress))
+                            {
+                                var macDuplicate = _db.Query<PrinterEntity>(
+                                    "SELECT * FROM printers WHERE mac_address = ? AND impresora_id != ?",
+                                    existing.MacAddress, dto.impresora_id).FirstOrDefault();
+                                if (macDuplicate != null)
+                                {
+                                    // Actualizar la impresora que ya tiene esa MAC — IP solo si está OFFLINE
+                                    if (macDuplicate.EstadoOnline != 1 && !string.IsNullOrEmpty(dto.ip))
+                                    {
+                                        macDuplicate.Ip = dto.ip;
+                                    }
+                                    macDuplicate.Nombre = dto.nombre ?? macDuplicate.Nombre;
+                                    macDuplicate.Puerto = dto.puerto > 0 ? dto.puerto : macDuplicate.Puerto;
+                                    // UPDATE selectivo: NO tocar estado_online/disponible_para_imprimir/tiene_papel/tapa_abierta/ultimo_check.
+                                    // RAZÓN: evita race con StatusMonitor que podría haber actualizado esos campos entre el SELECT
+                                    // y este UPDATE; un _db.Update(macDuplicate) reescribiría toda la fila con valores stale.
+                                    _db.Execute(
+                                        "UPDATE printers SET ip = ?, nombre = ?, puerto = ? WHERE impresora_id = ?",
+                                        macDuplicate.Ip, macDuplicate.Nombre, macDuplicate.Puerto, macDuplicate.ImpresoraId);
+                                    // Quitar la MAC del registro actual para evitar duplicado (UPDATE selectivo)
+                                    _db.Execute(
+                                        "UPDATE printers SET mac_address = NULL WHERE impresora_id = ?",
+                                        existing.ImpresoraId);
+                                    existing.MacAddress = null;
+                                    Log.WarnFormat("[PRINTER-SYNC] MAC {0} ya registrada en {1} ({2}) → datos actualizados. Se quitó MAC de {3}",
+                                        macDuplicate.MacAddress, macDuplicate.ImpresoraId, macDuplicate.Nombre, dto.impresora_id);
+                                    updatedCount++;
+                                    continue; // Ya se procesó, saltar al siguiente
+                                }
+                            }
+
+                            // UPDATE selectivo: solo ip/nombre/puerto/mac_address — NO pisar estado que maneja StatusMonitor.
+                            // RAZÓN: _db.Update(existing) reescribiría toda la fila, incluyendo estado_online que pudo
+                            // haber cambiado entre el SELECT (línea ~424) y este punto (race con StatusMonitor).
+                            _db.Execute(
+                                "UPDATE printers SET ip = ?, nombre = ?, puerto = ?, mac_address = ? WHERE impresora_id = ?",
+                                existing.Ip, existing.Nombre, existing.Puerto, existing.MacAddress, existing.ImpresoraId);
+                            updatedCount++; // Incrementar contador de actualizados
+
+                            Log.DebugFormat("[PRINTER-SYNC] Actualizada: {0} ({1}) → {2}",
+                                dto.impresora_id, dto.nombre, dto.ip); // Log de actualización
                         }
+                        else
+                        {
+                            // ═══════════════════════════════════════════════════════
+                            // INSERTAR impresora nueva
+                            // ═══════════════════════════════════════════════════════
+                            var newPrinter = new PrinterEntity
+                            {
+                                ImpresoraId = dto.impresora_id, // Asignar ID
+                                Nombre = dto.nombre ?? dto.impresora_id, // Asignar nombre (default = ID)
+                                Ip = dto.ip, // Asignar IP
+                                Puerto = dto.puerto > 0 ? dto.puerto : 9100, // Puerto (default 9100)
+                                MacAddress = dto.mac_address, // Asignar MAC
+                                ModoImpresion = "ethernet", // Default: ethernet (QuipuNetX envía solo modo SERVICIO = ethernet)
+                                FechaRegistro = DateTime.Now.ToString("o"), // Timestamp ISO 8601
+                                EstadoOnline = 0, // Default: offline (StatusMonitor lo actualizará)
+                                TienePapel = 1, // Default: asumimos que tiene papel
+                                TapaAbierta = 0, // Default: asumimos tapa cerrada
+                                IpResueltaPorArp = 0 // Default: no resuelta por ARP
+                            };
 
-                        _db.Insert(newPrinter); // Ejecutar INSERT en BD
-                        insertedCount++; // Incrementar contador de insertados
+                            // Dedup por MAC: si otra impresora ya tiene la misma MAC, es el mismo dispositivo físico
+                            // → actualizar los datos de la impresora existente (no duplicar, no eliminar)
+                            if (!string.IsNullOrEmpty(newPrinter.MacAddress))
+                            {
+                                var macDuplicate = _db.Query<PrinterEntity>(
+                                    "SELECT * FROM printers WHERE mac_address = ? AND impresora_id != ?",
+                                    newPrinter.MacAddress, dto.impresora_id).FirstOrDefault();
+                                if (macDuplicate != null)
+                                {
+                                    // Actualizar la impresora que ya tiene esa MAC — IP solo si está OFFLINE
+                                    if (macDuplicate.EstadoOnline != 1 && !string.IsNullOrEmpty(dto.ip))
+                                    {
+                                        macDuplicate.Ip = dto.ip;
+                                    }
+                                    macDuplicate.Nombre = dto.nombre ?? macDuplicate.Nombre;
+                                    macDuplicate.Puerto = dto.puerto > 0 ? dto.puerto : macDuplicate.Puerto;
+                                    // UPDATE selectivo: solo ip/nombre/puerto. NO pisar estado operativo de StatusMonitor.
+                                    _db.Execute(
+                                        "UPDATE printers SET ip = ?, nombre = ?, puerto = ? WHERE impresora_id = ?",
+                                        macDuplicate.Ip, macDuplicate.Nombre, macDuplicate.Puerto, macDuplicate.ImpresoraId);
+                                    Log.WarnFormat("[PRINTER-SYNC] MAC {0} ya registrada en {1} ({2}) → datos actualizados con info de {3}",
+                                        macDuplicate.MacAddress, macDuplicate.ImpresoraId, macDuplicate.Nombre, dto.impresora_id);
+                                    updatedCount++;
+                                    continue; // No insertar, ya se actualizó la existente
+                                }
+                            }
 
-                        Log.InfoFormat("[PRINTER-SYNC] Insertada: {0} ({1}) → {2}", 
-                            dto.impresora_id, dto.nombre, dto.ip); // Log de inserción
+                            _db.Insert(newPrinter); // Ejecutar INSERT en BD
+                            insertedCount++; // Incrementar contador de insertados
+
+                            Log.InfoFormat("[PRINTER-SYNC] Insertada: {0} ({1}) → {2}",
+                                dto.impresora_id, dto.nombre, dto.ip); // Log de inserción
+                        }
                     }
+                    catch(Exception ex)
+                    {
+                        Log.Error("[PRINTER-SYNC] Error durante sincronización", ex);
+                    
+                    }
+                  
                 }
 
                 // Crear respuesta exitosa con estadísticas

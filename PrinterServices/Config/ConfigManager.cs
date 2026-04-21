@@ -417,6 +417,41 @@ namespace PrinterServices.Config
                     Key = "TcpChunkDelayMs", Value = "5", DefaultValue = "5",
                     Description = "Pausa en ms entre fragmentos para que la impresora procese cada chunk (solo si TcpChunkEnabled=1). Valores típicos: 2-20ms.",
                     Category = "network", ValueType = "int", MinValue = "1", MaxValue = "200"
+                },
+
+                // ── Espera post-send proporcional a negro del bitmap ──
+                // Evita que el siguiente job envíe ESC @ (reset) mientras la impresora
+                // todavía está imprimiendo físicamente — lo que corta el ticket a la mitad
+                // y lo cruza con el siguiente. Fórmula estimada desde alto + densidad de negro.
+                new ConfigSettingEntity
+                {
+                    Key = "PostPrintWaitEnabled", Value = "1", DefaultValue = "1",
+                    Description = "Activar espera post-send proporcional al negro del bitmap. Previene que jobs consecutivos se crucen en el papel cuando hay imágenes con mucho negro (throttling térmico).",
+                    Category = "timing", ValueType = "bool"
+                },
+                new ConfigSettingEntity
+                {
+                    Key = "PostPrintWaitBaseMsPerRow", Value = "2", DefaultValue = "2",
+                    Description = "Ms estimados por fila del bitmap en condiciones normales (papel claro). Base: ~150 mm/s a 8 dots/mm ≈ 0.8 ms/fila; default 2 ms conservador.",
+                    Category = "timing", ValueType = "int", MinValue = "0", MaxValue = "50"
+                },
+                new ConfigSettingEntity
+                {
+                    Key = "PostPrintWaitExtraMsPerBlackRow", Value = "10", DefaultValue = "10",
+                    Description = "Ms extra por fila 100% negra (se multiplica por la fracción de negro de cada fila). Compensa el throttling térmico del cabezal con alta densidad.",
+                    Category = "timing", ValueType = "int", MinValue = "0", MaxValue = "100"
+                },
+                new ConfigSettingEntity
+                {
+                    Key = "PostPrintWaitMinMs", Value = "100", DefaultValue = "100",
+                    Description = "Piso de la espera post-send en ms (se aplica si el bitmap es pequeño o tiene poco negro).",
+                    Category = "timing", ValueType = "int", MinValue = "0", MaxValue = "10000"
+                },
+                new ConfigSettingEntity
+                {
+                    Key = "PostPrintWaitMaxMs", Value = "4000", DefaultValue = "4000",
+                    Description = "Techo de seguridad de la espera post-send en ms. Protege contra estimaciones excesivas en tickets muy largos con mucho negro.",
+                    Category = "timing", ValueType = "int", MinValue = "0", MaxValue = "60000"
                 }
             };
 

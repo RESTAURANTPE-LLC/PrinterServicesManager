@@ -87,6 +87,12 @@ namespace PrinterServices.Data
             CreateTable<Models.PrinterLatencyStatsEntity>();
             CreateTable<Models.NetworkLatencyBaselineEntity>();
 
+            // Health Dashboard: tablas nuevas (idempotente via CreateTable)
+            CreateTable<Models.NetworkSpeedLogEntity>();
+            try { Execute("CREATE INDEX IF NOT EXISTS idx_speed_measured ON network_speed_log(measured_at)"); } catch { }
+            CreateTable<Models.DeviceOnNetworkEntity>();
+            try { Execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_device_mac ON devices_on_network(mac_address)"); Execute("CREATE INDEX IF NOT EXISTS idx_device_online ON devices_on_network(is_online)"); } catch { }
+
             // Migración: agregar columnas si no existen
             try
             {
@@ -338,5 +344,52 @@ namespace PrinterServices.Data
                 _instance = null;
             }
         }
+    }
+}
+
+namespace PrinterServices.Data.Models
+{
+    [PSQLite.Table("network_speed_log")]
+    public class NetworkSpeedLogEntity
+    {
+        [PSQLite.PrimaryKey, PSQLite.AutoIncrement, PSQLite.Column("id")]
+        public int Id { get; set; }
+        [PSQLite.Column("download_speed_kbps")]
+        public double DownloadSpeedKbps { get; set; }
+        [PSQLite.Column("latency_ms")]
+        public int LatencyMs { get; set; }
+        [PSQLite.Column("gateway_ip")]
+        public string GatewayIp { get; set; }
+        [PSQLite.Column("network_id")]
+        public string NetworkId { get; set; }
+        [PSQLite.Column("measured_at")]
+        public string MeasuredAt { get; set; }
+    }
+
+    [PSQLite.Table("devices_on_network")]
+    public class DeviceOnNetworkEntity
+    {
+        [PSQLite.PrimaryKey, PSQLite.AutoIncrement, PSQLite.Column("id")]
+        public int Id { get; set; }
+        [PSQLite.Column("ip_address")]
+        public string IpAddress { get; set; }
+        [PSQLite.Column("mac_address")]
+        public string MacAddress { get; set; }
+        [PSQLite.Column("hostname")]
+        public string Hostname { get; set; }
+        [PSQLite.Column("vendor")]
+        public string Vendor { get; set; }
+        [PSQLite.Column("device_type")]
+        public string DeviceType { get; set; }
+        [PSQLite.Column("first_seen_at")]
+        public string FirstSeenAt { get; set; }
+        [PSQLite.Column("last_seen_at")]
+        public string LastSeenAt { get; set; }
+        [PSQLite.Column("is_online")]
+        public int IsOnline { get; set; }
+        [PSQLite.Column("network_id")]
+        public string NetworkId { get; set; }
+        [PSQLite.Column("gateway_mac")]
+        public string GatewayMac { get; set; }
     }
 }

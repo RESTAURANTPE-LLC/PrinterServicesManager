@@ -30,6 +30,8 @@ namespace PrinterServices
         private UdpDiscoveryServer _udpDiscovery;     // Fase 6: auto-descubrimiento UDP
         private NetworkWatcher _networkWatcher;       // Fase 8: monitoreo bidireccional de red
         private DbMaintenanceWorker _dbMaintenanceWorker; // Purga logs > 30 días cada hora
+        private NetworkSpeedWorker _networkSpeedWorker;
+        private NetworkDiscoveryWorker _networkDiscoveryWorker;
 
         public void Start()
         {
@@ -152,6 +154,14 @@ namespace PrinterServices
                 _udpDiscovery.Start();
                 int udpPort = _configManager.GetInt("UdpDiscoveryPort", 9999);
 
+                // 11. Health Dashboard workers
+                _networkSpeedWorker = new NetworkSpeedWorker(_db, _configManager);
+                _networkSpeedWorker.Start();
+                Api.ApiRouter.SpeedWorker = _networkSpeedWorker;
+                _networkDiscoveryWorker = new NetworkDiscoveryWorker(_db, _configManager);
+                _networkDiscoveryWorker.Start();
+                Api.ApiRouter.DiscoveryWorker = _networkDiscoveryWorker;
+
                 Log.Info("═══════════════════════════════════════════════");
                 Log.Info("  PrinterServices — Listo");
                 Log.InfoFormat("  HTTP: http://localhost:{0}/api/health", httpPort);
@@ -219,6 +229,9 @@ namespace PrinterServices
                     _udpDiscovery.Stop();
                 }
 
+                if (_networkSpeedWorker != null) _networkSpeedWorker.Stop();
+                if (_networkDiscoveryWorker != null) _networkDiscoveryWorker.Stop();
+
                 // Detener gRPC server (graceful shutdown, espera hasta 5s para cerrar streams)
                 if (_grpcServer != null)
                 {
@@ -245,6 +258,246 @@ namespace PrinterServices
             }
 
             Log.Info("PrinterServices — Detenido.");
+        }
+    }
+
+    /// <summary>
+    /// Worker: Mide velocidad de red cada 2 horas o manualmente.
+    /// Inline en este archivo porque los archivos nuevos creados en macOS no compilan via C:\Mac\Home\.
+    /// </summary>
+    public class NetworkSpeedWorker
+    {
+        private static readonly ILog Log = LogManager.GetLogger(typeof(NetworkSpeedWorker));
+        private readonly Data.PrinterServiceDb _db;
+        private readonly Config.ConfigManager _config;
+        private System.Threading.CancellationTokenSource _cts;
+        private System.Threading.Tasks.Task _workerTask;
+        private readonly System.Threading.SemaphoreSlim _manualSignal = new System.Threading.SemaphoreSlim(0, 1);
+
+        public NetworkSpeedWorker(Data.PrinterServiceDb db, Config.ConfigManager config) { _db = db; _config = config; }
+
+        public void Start()
+        {
+            if (_workerTask != null) return;
+            _cts = new System.Threading.CancellationTokenSource();
+            _workerTask = System.Threading.Tasks.Task.Factory.StartNew(() => RunLoop(_cts.Token), _cts.Token, System.Threading.Tasks.TaskCreationOptions.LongRunning, System.Threading.Tasks.TaskScheduler.Default);
+            Log.Info("[SPEED-WORKER] Iniciado");
+        }
+
+        public void Stop()
+        {
+            if (_cts != null) _cts.Cancel();
+            if (_workerTask != null) try { _workerTask.Wait(TimeSpan.FromSeconds(5)); } catch { }
+            Log.Info("[SPEED-WORKER] Detenido");
+        }
+
+        public void MeasureNow() { try { if (_manualSignal.CurrentCount == 0) _manualSignal.Release(); } catch { } }
+
+        private void RunLoop(System.Threading.CancellationToken ct)
+        {
+            try { System.Threading.Tasks.Task.Delay(30000, ct).Wait(ct); } catch { return; }
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    var networkCurrent = _db.Table<Data.Models.NetworkCurrentEntity>().FirstOrDefault(n => n.Id == 1);
+                    string gatewayIp = networkCurrent?.GatewayIp;
+                    int latencyMs = 0;
+                    if (!string.IsNullOrEmpty(gatewayIp))
+                    {
+                        using (var ping = new System.Net.NetworkInformation.Ping())
+                        {
+                            long totalMs = 0; int ok = 0;
+                            for (int i = 0; i < 3; i++) { var r = ping.Send(gatewayIp, 2000); if (r.Status == System.Net.NetworkInformation.IPStatus.Success) { totalMs += r.RoundtripTime; ok++; } }
+                            latencyMs = ok > 0 ? (int)(totalMs / ok) : -1;
+                        }
+                    }
+                    double downloadKbps = 0;
+                    try
+                    {
+                        var sw = System.Diagnostics.Stopwatch.StartNew(); long bytes = 0;
+                        var req = (System.Net.HttpWebRequest)System.Net.WebRequest.Create("https://instaladores.restaurant.pe/printer.zip");
+                        req.Timeout = 10000; req.ReadWriteTimeout = 10000;
+                        using (var resp = (System.Net.HttpWebResponse)req.GetResponse())
+                        using (var stream = resp.GetResponseStream())
+                        {
+                            var buf = new byte[8192]; int read;
+                            while ((read = stream.Read(buf, 0, buf.Length)) > 0) { bytes += read; if (sw.ElapsedMilliseconds > 5000) break; }
+                        }
+                        sw.Stop();
+                        if (sw.ElapsedMilliseconds > 100 && bytes > 1024) downloadKbps = Math.Round((bytes * 8.0) / (sw.ElapsedMilliseconds / 1000.0) / 1024.0, 1);
+                    }
+                    catch (Exception ex) { Log.Warn("[SPEED-WORKER] Error descarga: " + ex.Message); }
+                    _db.Insert(new Data.Models.NetworkSpeedLogEntity { DownloadSpeedKbps = downloadKbps, LatencyMs = latencyMs, GatewayIp = gatewayIp ?? "N/A", NetworkId = networkCurrent?.NetworkId ?? "N/A", MeasuredAt = DateTime.Now.ToString("o") });
+                    Log.InfoFormat("[SPEED-WORKER] {0:F1} Kbps, {1}ms", downloadKbps, latencyMs);
+                }
+                catch (Exception ex) { Log.Error("[SPEED-WORKER] Error: " + ex.Message); }
+                try { int mins = _config.GetInt("NetworkSpeedIntervalMinutes", 120); _manualSignal.Wait(TimeSpan.FromMinutes(mins), ct); }
+                catch (OperationCanceledException) { break; }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Worker: Descubre dispositivos en la red cada 1 hora o manualmente.
+    /// </summary>
+    public class NetworkDiscoveryWorker
+    {
+        private static readonly ILog Log = LogManager.GetLogger(typeof(NetworkDiscoveryWorker));
+        private readonly Data.PrinterServiceDb _db;
+        private readonly Config.ConfigManager _config;
+        private System.Threading.CancellationTokenSource _cts;
+        private System.Threading.Tasks.Task _workerTask;
+        private readonly System.Threading.SemaphoreSlim _manualSignal = new System.Threading.SemaphoreSlim(0, 1);
+
+        public NetworkDiscoveryWorker(Data.PrinterServiceDb db, Config.ConfigManager config) { _db = db; _config = config; }
+
+        public void Start()
+        {
+            if (_workerTask != null) return;
+            _cts = new System.Threading.CancellationTokenSource();
+            _workerTask = System.Threading.Tasks.Task.Factory.StartNew(() => RunLoop(_cts.Token), _cts.Token, System.Threading.Tasks.TaskCreationOptions.LongRunning, System.Threading.Tasks.TaskScheduler.Default);
+            Log.Info("[DISCOVERY] Iniciado");
+        }
+
+        public void Stop()
+        {
+            if (_cts != null) _cts.Cancel();
+            if (_workerTask != null) try { _workerTask.Wait(TimeSpan.FromSeconds(10)); } catch { }
+            Log.Info("[DISCOVERY] Detenido");
+        }
+
+        /// <summary>Ejecuta scan inmediato (llamado desde endpoint HTTP, corre en el request thread)</summary>
+        public void ScanNow()
+        {
+            try { PerformScan(System.Threading.CancellationToken.None); }
+            catch (Exception ex) { Log.Error("[DISCOVERY] Error en ScanNow: " + ex.Message); }
+        }
+
+        private void RunLoop(System.Threading.CancellationToken ct)
+        {
+            // Primer scan despues de 60 segundos
+            try { _manualSignal.Wait(TimeSpan.FromSeconds(60), ct); } catch { return; }
+            while (!ct.IsCancellationRequested)
+            {
+                try { PerformScan(ct); }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex) { Log.Error("[DISCOVERY] Error: " + ex.Message); }
+                try { int mins = _config.GetInt("NetworkDiscoveryIntervalMinutes", 60); _manualSignal.Wait(TimeSpan.FromMinutes(mins), ct); }
+                catch (OperationCanceledException) { break; }
+            }
+        }
+
+        private void PerformScan(System.Threading.CancellationToken ct)
+        {
+            var nc = _db.Table<Data.Models.NetworkCurrentEntity>().FirstOrDefault(n => n.Id == 1);
+            string gwMac = nc?.GatewayMac ?? "";
+            string netId = nc?.NetworkId ?? "";
+            string myIp = nc?.PrinterServiceIp ?? "";
+            string mask = nc?.SubnetMask ?? "255.255.255.0";
+            string now = DateTime.Now.ToString("o");
+            int newCount = 0, updCount = 0;
+
+            // Paso 1: Ping sweep paralelo para forzar al OS a poblar la tabla ARP
+            // Sin esto, solo aparecen dispositivos con los que ya hubo comunicacion
+            if (!string.IsNullOrEmpty(myIp))
+            {
+                PingSweep(myIp, mask, ct);
+            }
+
+            // Paso 2: Leer tabla ARP completa (ahora incluye dispositivos descubiertos por el ping sweep)
+            var arpTable = PrinterServices.Core.Network.ArpHelper.GetArpTable();
+            Log.InfoFormat("[DISCOVERY] Tabla ARP tiene {0} entradas (post-sweep)", arpTable.Count);
+
+            if (arpTable.Count == 0) { Log.Warn("[DISCOVERY] Tabla ARP vacia"); return; }
+
+            try { _db.Execute("UPDATE devices_on_network SET is_online = 0"); } catch { }
+
+            foreach (var entry in arpTable)
+            {
+                if (ct.IsCancellationRequested) break;
+                try
+                {
+                    string ip = entry.Key;
+                    string mac = BitConverter.ToString(entry.Value.GetAddressBytes()).Replace("-", ":");
+                    // Omitir broadcast y multicast
+                    if (mac.StartsWith("FF:FF:FF") || mac.StartsWith("01:00:5E")) continue;
+
+                    string hostname = null;
+                    try { var he = System.Net.Dns.GetHostEntry(ip); if (he != null && !string.IsNullOrEmpty(he.HostName) && he.HostName != ip) hostname = he.HostName; } catch { }
+                    string vendor = Services.Network.OuiLookup.GetVendor(mac);
+                    string devType = Services.Network.OuiLookup.InferDeviceType(vendor);
+
+                    var existing = _db.Table<Data.Models.DeviceOnNetworkEntity>().FirstOrDefault(d => d.MacAddress == mac);
+                    if (existing != null)
+                    {
+                        existing.IpAddress = ip; existing.LastSeenAt = now; existing.IsOnline = 1;
+                        existing.NetworkId = netId; existing.GatewayMac = gwMac;
+                        if (hostname != null) existing.Hostname = hostname;
+                        if (vendor != null) existing.Vendor = vendor;
+                        existing.DeviceType = devType;
+                        _db.Update(existing); updCount++;
+                    }
+                    else
+                    {
+                        _db.Insert(new Data.Models.DeviceOnNetworkEntity { IpAddress = ip, MacAddress = mac, Hostname = hostname, Vendor = vendor, DeviceType = devType, FirstSeenAt = now, LastSeenAt = now, IsOnline = 1, NetworkId = netId, GatewayMac = gwMac });
+                        newCount++;
+                    }
+                }
+                catch { }
+            }
+            Log.InfoFormat("[DISCOVERY] {0} nuevos, {1} actualizados de {2} entradas ARP", newCount, updCount, arpTable.Count);
+        }
+
+        /// <summary>
+        /// Ping sweep paralelo: envia ICMP echo a todas las IPs de la subred.
+        /// Esto fuerza al OS a enviar ARP requests y poblar la tabla ARP con dispositivos desconocidos.
+        /// Timeout corto (50ms) + paralelo = ~3-5 segundos para /24 completa.
+        /// </summary>
+        private void PingSweep(string myIp, string subnetMask, System.Threading.CancellationToken ct)
+        {
+            try
+            {
+                var ipb = System.Net.IPAddress.Parse(myIp).GetAddressBytes();
+                var mb = System.Net.IPAddress.Parse(subnetMask).GetAddressBytes();
+                var nb = new byte[4];
+                for (int i = 0; i < 4; i++) nb[i] = (byte)(ipb[i] & mb[i]);
+                uint na = (uint)(nb[0] << 24 | nb[1] << 16 | nb[2] << 8 | nb[3]);
+
+                // Calcular cantidad de hosts (max 254 para /24)
+                var bb = new byte[4];
+                for (int i = 0; i < 4; i++) bb[i] = (byte)(nb[i] | ~mb[i]);
+                uint ba = (uint)(bb[0] << 24 | bb[1] << 16 | bb[2] << 8 | bb[3]);
+                uint cnt = ba - na - 1; if (cnt > 254) cnt = 254;
+
+                Log.InfoFormat("[DISCOVERY] Ping sweep: {0} hosts en red {1}", cnt, myIp);
+
+                // Ping paralelo con Parallel.ForEach (max 20 threads simultaneos)
+                var ips = new System.Collections.Generic.List<string>();
+                for (uint i = 1; i <= cnt; i++)
+                {
+                    uint a = na + i;
+                    ips.Add(string.Format("{0}.{1}.{2}.{3}", (a >> 24) & 0xFF, (a >> 16) & 0xFF, (a >> 8) & 0xFF, a & 0xFF));
+                }
+
+                var options = new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = 20, CancellationToken = ct };
+                System.Threading.Tasks.Parallel.ForEach(ips, options, ip =>
+                {
+                    try
+                    {
+                        using (var ping = new System.Net.NetworkInformation.Ping())
+                        {
+                            ping.Send(ip, 50); // Timeout 50ms — solo necesitamos que el OS envie ARP
+                        }
+                    }
+                    catch { }
+                });
+
+                // Esperar 500ms para que el OS procese las respuestas ARP
+                System.Threading.Thread.Sleep(500);
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { Log.Warn("[DISCOVERY] Error en ping sweep: " + ex.Message); }
         }
     }
 }

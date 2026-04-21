@@ -101,23 +101,27 @@ namespace PrinterServices.Services.Printers
                     normalizedMac, printer.ImpresoraId).FirstOrDefault();
                 if (macDuplicate != null)
                 {
-                    // Actualizar la impresora que ya tiene esa MAC con la IP actual
-                    macDuplicate.Ip = printer.Ip;
-                    macDuplicate.Nombre = printer.Nombre ?? macDuplicate.Nombre;
-                    _db.Update(macDuplicate);
+                    // UPDATE selectivo: solo ip/nombre. NO pisar estado operativo (estado_online/tiene_papel/etc).
+                    // RAZÓN: evita race con StatusMonitor que pudo actualizar estado entre SELECT y este UPDATE.
+                    string newNombre = printer.Nombre ?? macDuplicate.Nombre;
+                    _db.Execute(
+                        "UPDATE printers SET ip = ?, nombre = ? WHERE impresora_id = ?",
+                        printer.Ip, newNombre, macDuplicate.ImpresoraId);
                     Log.WarnFormat("[MAC-ENRICH] MAC {0} ya registrada en {1} ({2}) → IP actualizada a {3}. No se asigna MAC a {4}",
-                        MacAddressNormalizer.Format(normalizedMac), macDuplicate.ImpresoraId, macDuplicate.Nombre,
+                        MacAddressNormalizer.Format(normalizedMac), macDuplicate.ImpresoraId, newNombre,
                         printer.Ip, printer.Nombre ?? printer.ImpresoraId);
                     return false; // No asignar MAC a esta impresora, ya existe en otra
                 }
 
-                // Asignar MAC normalizada a la entidad
-                // RAZÓN: Actualizar objeto en memoria antes de persistir
+                // Asignar MAC normalizada a la entidad (en memoria)
+                // RAZÓN: Que los pasos posteriores del mismo ciclo vean la MAC sin releer BD
                 printer.MacAddress = normalizedMac;
 
-                // Persistir en BD
-                // RAZÓN: Guardar cambio para que StatusMonitor pueda usar MAC en próximos ciclos
-                _db.Update(printer);
+                // Persistir solo la MAC en BD con UPDATE selectivo.
+                // RAZÓN: un _db.Update(printer) reescribiría estado_online/etc con valores stale.
+                _db.Execute(
+                    "UPDATE printers SET mac_address = ? WHERE impresora_id = ?",
+                    normalizedMac, printer.ImpresoraId);
 
                 // Loguear éxito para diagnóstico
                 // RAZÓN: Rastrear cuándo se obtienen MACs exitosamente
@@ -184,9 +188,12 @@ namespace PrinterServices.Services.Printers
                 string oldMac = printer.MacAddress;
                 printer.MacAddress = normalized;
 
-                // Persistir en BD
-                // RAZÓN: Guardar cambio para próximos ciclos
-                _db.Update(printer);
+                // UPDATE selectivo: solo mac_address.
+                // RAZÓN: un _db.Update(printer) reescribiría estado_online/etc con valores stale
+                // que podrían haber sido actualizados por StatusMonitor mientras este código corría.
+                _db.Execute(
+                    "UPDATE printers SET mac_address = ? WHERE impresora_id = ?",
+                    normalized, printer.ImpresoraId);
 
                 // Loguear cambio para diagnóstico
                 // RAZÓN: Rastrear cuándo se normalizan MACs

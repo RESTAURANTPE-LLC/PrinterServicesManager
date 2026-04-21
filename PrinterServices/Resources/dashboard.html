@@ -36,6 +36,9 @@
                 <button onclick="openConfigModal()" class="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-sm font-semibold transition-colors">
                     ⚙️ Configurar Sistema
                 </button>
+                <button onclick="openSqlConsole()" class="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 rounded text-sm font-semibold transition-colors">
+                    🗄️ SQL Console
+                </button>
             </div>
         </header>
 
@@ -43,6 +46,14 @@
         <section class="mb-6 bg-gray-800 p-4 rounded-lg">
             <h2 class="text-2xl font-semibold mb-3">🌐 Estado de Red</h2>
             <div id="network-status" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="text-gray-400">Cargando...</div>
+            </div>
+        </section>
+
+        <!-- Info del Sistema -->
+        <section class="mb-6 bg-gray-800 p-4 rounded-lg">
+            <h2 class="text-2xl font-semibold mb-3">💻 Sistema</h2>
+            <div id="system-info" class="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div class="text-gray-400">Cargando...</div>
             </div>
         </section>
@@ -120,6 +131,38 @@
             </div>
             <div id="notif-pagination" class="flex justify-center gap-2">
                 <!-- Botones de paginación de notificaciones -->
+            </div>
+        </section>
+
+        <!-- Dispositivos en la Red -->
+        <section class="mb-6 bg-gray-800 p-4 rounded-lg">
+            <div class="flex justify-between items-center mb-3">
+                <h2 class="text-2xl font-semibold">📡 Dispositivos en la Red</h2>
+                <div class="flex gap-2">
+                    <button onclick="triggerNetworkScan()" class="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm">Escanear ahora</button>
+                    <button onclick="triggerSpeedMeasure()" class="px-3 py-1 bg-green-600 hover:bg-green-700 rounded text-sm">Medir velocidad</button>
+                </div>
+            </div>
+            <div id="network-devices" class="overflow-x-auto">
+                <div class="text-gray-400">Cargando...</div>
+            </div>
+        </section>
+
+        <!-- QuipuNet Health -->
+        <section class="mb-6 bg-gray-800 p-4 rounded-lg">
+            <div class="flex justify-between items-center mb-3">
+                <h2 class="text-2xl font-semibold">🖥️ QuipuNet Health</h2>
+                <div class="flex gap-2">
+                    <button onclick="loadQuipuNetHealth()" class="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm">Actualizar</button>
+                    <button onclick="takeScreenshot()" class="px-3 py-1 bg-purple-600 hover:bg-purple-700 rounded text-sm">Screenshot</button>
+                    <button onclick="openUpdateModal()" class="px-3 py-1 bg-orange-600 hover:bg-orange-700 rounded text-sm">Actualizar Servicio</button>
+                </div>
+            </div>
+            <div id="quipunet-health" class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="text-gray-400">Click "Actualizar" para cargar</div>
+            </div>
+            <div id="screenshot-container" class="mt-4 hidden">
+                <img id="screenshot-img" class="w-full rounded border border-gray-600" />
             </div>
         </section>
 
@@ -208,6 +251,41 @@
                     <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm font-semibold">Guardar</button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <!-- Modal SQL Console -->
+    <div id="sql-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50">
+        <div class="bg-gray-800 rounded-lg p-6 w-full max-w-5xl mx-4 max-h-[90vh] overflow-y-auto">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-2xl font-bold">🗄️ SQL Console</h2>
+                <button onclick="closeSqlConsole()" class="text-2xl hover:text-red-500">&times;</button>
+            </div>
+            <div class="mb-3">
+                <label class="text-sm text-gray-400">Queries comunes:</label>
+                <select id="sql-presets" onchange="loadSqlPreset()" class="ml-2 bg-gray-700 text-white rounded px-2 py-1 text-sm">
+                    <option value="">-- Seleccionar --</option>
+                    <option value="SELECT * FROM printers">Impresoras</option>
+                    <option value="SELECT * FROM print_jobs WHERE estado IN ('PENDING','WAITING','PRINTING') ORDER BY fecha_creacion DESC">Jobs activos</option>
+                    <option value="SELECT * FROM network_current WHERE id=1">Red actual</option>
+                    <option value="SELECT * FROM config_settings ORDER BY key">Configuracion</option>
+                    <option value="SELECT * FROM network_speed_log ORDER BY measured_at DESC LIMIT 20">Velocidad red</option>
+                    <option value="SELECT * FROM devices_on_network ORDER BY last_seen_at DESC">Dispositivos en red</option>
+                    <option value="SELECT name FROM sqlite_master WHERE type='table' ORDER BY name">Listar tablas</option>
+                </select>
+            </div>
+            <textarea id="sql-query" rows="4" class="w-full bg-gray-900 text-green-400 font-mono p-3 rounded border border-gray-600 focus:border-blue-500 focus:outline-none text-sm" placeholder="Escribe tu query SQL aqui..."></textarea>
+            <div class="flex gap-2 mt-2 mb-4">
+                <button onclick="executeSql()" class="px-4 py-2 bg-green-600 hover:bg-green-700 rounded text-sm font-semibold">▶ Ejecutar</button>
+                <button onclick="clearSqlResults()" class="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded text-sm">Limpiar</button>
+                <span id="sql-status" class="text-sm text-gray-400 self-center ml-2"></span>
+            </div>
+            <div id="sql-confirm" class="hidden mb-4 p-3 bg-yellow-900 border border-yellow-600 rounded">
+                <p class="text-yellow-200 mb-2">⚠️ Esta operacion modificara la base de datos. ¿Confirmar?</p>
+                <button onclick="executeSql(true)" class="px-3 py-1 bg-red-600 hover:bg-red-700 rounded text-sm mr-2">Si, ejecutar</button>
+                <button onclick="document.getElementById('sql-confirm').classList.add('hidden')" class="px-3 py-1 bg-gray-600 rounded text-sm">Cancelar</button>
+            </div>
+            <div id="sql-results" class="overflow-x-auto"></div>
         </div>
     </div>
 
@@ -375,9 +453,46 @@
                 </div>
                 <div>
                     <p class="text-sm text-gray-400">Estado</p>
-                    <span class="px-3 py-1 rounded text-sm font-semibold status-${netStatus.healthStatus}">${netStatus.healthStatus}</span>
+                    <span class="px-3 py-1 rounded text-sm font-semibold status-${netStatus.status}">${netStatus.status}</span>
                 </div>
+                ${data.latestSpeed ? `
+                <div>
+                    <p class="text-sm text-gray-400">Velocidad Descarga</p>
+                    <p class="text-lg font-semibold ${data.latestSpeed.downloadSpeedKbps > 1000 ? 'text-green-400' : data.latestSpeed.downloadSpeedKbps > 100 ? 'text-yellow-400' : 'text-red-400'}">${data.latestSpeed.downloadSpeedKbps > 1024 ? (data.latestSpeed.downloadSpeedKbps / 1024).toFixed(1) + ' Mbps' : data.latestSpeed.downloadSpeedKbps.toFixed(0) + ' Kbps'}</p>
+                </div>
+                <div>
+                    <p class="text-sm text-gray-400">Latencia Gateway</p>
+                    <p class="text-lg font-semibold ${data.latestSpeed.latencyMs < 5 ? 'text-green-400' : data.latestSpeed.latencyMs < 50 ? 'text-yellow-400' : 'text-red-400'}">${data.latestSpeed.latencyMs >= 0 ? data.latestSpeed.latencyMs + ' ms' : 'N/A'}</p>
+                </div>
+                ` : ''}
+                ${data.networkDevicesCount ? `
+                <div>
+                    <p class="text-sm text-gray-400">Dispositivos en Red</p>
+                    <p class="text-lg">${data.networkDevicesCount.online} / ${data.networkDevicesCount.total} online</p>
+                </div>
+                ` : ''}
             ` : '<p class="text-gray-400">Sin datos de red</p>';
+
+            // Sistema
+            if (data.system) {
+                const sys = data.system;
+                const ramUsedPct = sys.ramTotalMb > 0 ? Math.round((1 - sys.ramAvailableMb / sys.ramTotalMb) * 100) : 0;
+                const diskUsedPct = sys.diskTotalGb > 0 ? Math.round((1 - sys.diskFreeGb / sys.diskTotalGb) * 100) : 0;
+                document.getElementById('system-info').innerHTML = `
+                    <div><p class="text-sm text-gray-400">Hostname</p><p class="text-lg font-mono">${sys.hostname}</p></div>
+                    <div><p class="text-sm text-gray-400">SO</p><p class="text-sm">${sys.osVersion}</p></div>
+                    <div><p class="text-sm text-gray-400">CPU</p><p class="text-sm">${sys.cpu}</p></div>
+                    <div><p class="text-sm text-gray-400">.NET</p><p class="text-lg">${sys.dotNetVersion}</p></div>
+                    <div><p class="text-sm text-gray-400">RAM</p><p class="text-lg">${sys.ramAvailableMb.toLocaleString()} / ${sys.ramTotalMb.toLocaleString()} MB</p>
+                        <div class="w-full bg-gray-700 rounded-full h-2 mt-1"><div class="h-2 rounded-full ${ramUsedPct > 90 ? 'bg-red-500' : ramUsedPct > 70 ? 'bg-yellow-500' : 'bg-green-500'}" style="width:${ramUsedPct}%"></div></div>
+                        <p class="text-xs text-gray-500 mt-1">${ramUsedPct}% en uso</p></div>
+                    <div><p class="text-sm text-gray-400">Disco (${sys.diskDrive || 'C:\\\\'})</p><p class="text-lg">${sys.diskFreeGb} / ${sys.diskTotalGb} GB</p>
+                        <div class="w-full bg-gray-700 rounded-full h-2 mt-1"><div class="h-2 rounded-full ${diskUsedPct > 90 ? 'bg-red-500' : diskUsedPct > 70 ? 'bg-yellow-500' : 'bg-green-500'}" style="width:${diskUsedPct}%"></div></div>
+                        <p class="text-xs text-gray-500 mt-1">${diskUsedPct}% en uso</p></div>
+                    <div><p class="text-sm text-gray-400">Uptime</p><p class="text-lg">${sys.serviceUptime}</p></div>
+                    <div><p class="text-sm text-gray-400">PID</p><p class="text-lg font-mono">${sys.processId}</p></div>
+                `;
+            }
 
             // Stats
             document.getElementById('stats').innerHTML = `
@@ -1214,10 +1329,88 @@
         initChart();
         setupRefreshToggle();
         fetchDashboardData();
+        // ─── Dispositivos en la Red ───
+        async function loadNetworkDevices() {
+            try {
+                const res = await fetch(window.location.origin + '/api/dashboard/network-devices');
+                const data = await res.json();
+                const devices = data.data || [];
+                if (devices.length === 0) { document.getElementById('network-devices').innerHTML = '<p class="text-gray-400">Sin dispositivos. Click "Escanear ahora".</p>'; return; }
+                let html = `<p class="text-sm text-gray-400 mb-2">${data.onlineCount} de ${data.count} online</p>`;
+                html += '<table class="w-full text-sm"><thead><tr><th class="text-left p-2">IP</th><th class="text-left p-2">MAC</th><th class="text-left p-2">Vendor</th><th class="text-left p-2">Hostname</th><th class="text-left p-2">Tipo</th><th class="text-left p-2">Estado</th><th class="text-left p-2">Ultimo visto</th></tr></thead><tbody>';
+                devices.forEach(d => {
+                    const sc = d.isOnline ? 'text-green-400' : 'text-red-400';
+                    const te = {printer:'🖨️',router:'📡',gateway:'🌐',mobile:'📱',computer:'💻',sbc:'🔧'}[d.deviceType] || '❓';
+                    html += `<tr class="border-t border-gray-700"><td class="p-2 font-mono">${d.ip}</td><td class="p-2 font-mono text-xs">${d.mac}</td><td class="p-2">${d.vendor||'-'}</td><td class="p-2">${d.hostname||'-'}</td><td class="p-2">${te} ${d.deviceType}</td><td class="p-2 ${sc}">${d.isOnline?'Online':'Offline'}</td><td class="p-2 text-xs">${d.lastSeen?new Date(d.lastSeen).toLocaleString():'-'}</td></tr>`;
+                });
+                html += '</tbody></table>';
+                document.getElementById('network-devices').innerHTML = html;
+            } catch (err) { document.getElementById('network-devices').innerHTML = `<p class="text-red-400">${err.message}</p>`; }
+        }
+        async function triggerNetworkScan() { try { document.getElementById('network-devices').innerHTML='<p class="text-yellow-400">Escaneando red (~5s)...</p>'; const res=await fetch(window.location.origin+'/api/dashboard/network-scan',{method:'POST'}); const data=await res.json(); renderNetworkDevices(data); } catch(e){alert(e.message);} }
+        function renderNetworkDevices(data) {
+            const devices=data.data||[];
+            if(devices.length===0){document.getElementById('network-devices').innerHTML='<p class="text-gray-400">Sin dispositivos.</p>';return;}
+            let html=`<p class="text-sm text-gray-400 mb-2">${data.onlineCount} de ${data.count} online</p><table class="w-full text-sm"><thead><tr><th class="text-left p-2">IP</th><th class="text-left p-2">MAC</th><th class="text-left p-2">Vendor</th><th class="text-left p-2">Hostname</th><th class="text-left p-2">Tipo</th><th class="text-left p-2">Estado</th><th class="text-left p-2">Ultimo visto</th></tr></thead><tbody>`;
+            devices.forEach(d=>{const sc=d.isOnline?'text-green-400':'text-red-400';const te={printer:'🖨️',router:'📡',gateway:'🌐',mobile:'📱',computer:'💻',sbc:'🔧'}[d.deviceType]||'❓';html+=`<tr class="border-t border-gray-700"><td class="p-2 font-mono">${d.ip}</td><td class="p-2 font-mono text-xs">${d.mac}</td><td class="p-2">${d.vendor||'-'}</td><td class="p-2">${d.hostname||'-'}</td><td class="p-2">${te} ${d.deviceType}</td><td class="p-2 ${sc}">${d.isOnline?'Online':'Offline'}</td><td class="p-2 text-xs">${d.lastSeen?new Date(d.lastSeen).toLocaleString():'-'}</td></tr>`;});
+            html+='</tbody></table>'; document.getElementById('network-devices').innerHTML=html;
+        }
+        async function triggerSpeedMeasure() { try { await fetch(window.location.origin+'/api/dashboard/speed-measure',{method:'POST'}); alert('Medicion iniciada.'); } catch(e){alert(e.message);} }
+
+        // ─── QuipuNet Health ───
+        async function loadQuipuNetHealth() {
+            try {
+                document.getElementById('quipunet-health').innerHTML='<div class="text-yellow-400">Consultando...</div>';
+                const res = await fetch(window.location.origin+'/api/dashboard/quipunet-health');
+                const data = await res.json();
+                if (data.error) { document.getElementById('quipunet-health').innerHTML=`<div class="text-red-400 col-span-4">${data.error}</div>`; return; }
+                document.getElementById('quipunet-health').innerHTML=`
+                    <div><p class="text-sm text-gray-400">Version</p><p class="text-lg">${data.version||'-'}</p></div>
+                    <div><p class="text-sm text-gray-400">Uptime</p><p class="text-lg">${data.uptime||'-'}</p></div>
+                    <div><p class="text-sm text-gray-400">Modo</p><p class="text-lg">${data.modoServidor?'Servidor':'Cliente'}</p></div>
+                    <div><p class="text-sm text-gray-400">Admin</p><p class="text-lg ${data.esAdministrador?'text-green-400':'text-yellow-400'}">${data.esAdministrador?'Si':'No'}</p></div>
+                    <div><p class="text-sm text-gray-400">RAM QuipuNet</p><p class="text-lg">${data.memoriaRamMb?data.memoriaRamMb.toFixed(1)+' MB':'-'}</p></div>
+                    <div><p class="text-sm text-gray-400">VCS Locales</p><p class="text-lg font-semibold">${data.vcsLocales!=null?data.vcsLocales:'-'}</p></div>
+                    <div><p class="text-sm text-gray-400">VCS Remotos</p><p class="text-lg">${data.vcsRemotos!=null?data.vcsRemotos:'-'}</p></div>`;
+            } catch(err) { document.getElementById('quipunet-health').innerHTML=`<div class="text-red-400 col-span-4">QuipuNet no disponible: ${err.message}</div>`; }
+        }
+        async function takeScreenshot() {
+            try { document.getElementById('screenshot-container').classList.remove('hidden'); document.getElementById('screenshot-img').alt='Capturando...'; document.getElementById('screenshot-img').src='';
+                const res = await fetch(window.location.origin+'/api/dashboard/quipunet-screenshot'); const data = await res.json();
+                if (data.error) { document.getElementById('screenshot-img').alt='Error: '+data.error; return; }
+                document.getElementById('screenshot-img').src='data:image/jpeg;base64,'+(data.screenshot||data);
+            } catch(err) { document.getElementById('screenshot-img').alt='Error: '+err.message; }
+        }
+        function openUpdateModal() { const url=prompt('URL del paquete ZIP:','https://instaladores.restaurant.pe/printer.zip'); if(!url)return; if(!confirm('Esto detendra PrinterServices. ¿Continuar?'))return; startServiceUpdate(url); }
+        async function startServiceUpdate(zipUrl) { try { const res=await fetch(window.location.origin+'/api/dashboard/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({zipUrl})}); const data=await res.json(); if(data.error){alert('Error: '+data.error);return;} alert('Actualizacion iniciada. Se reconectara automaticamente.'); pollUpdateStatus(); } catch(e){alert(e.message);} }
+        async function pollUpdateStatus() { const check=async()=>{try{const r=await fetch(window.location.origin+'/api/health',{signal:AbortSignal.timeout(3000)});if(r.ok){location.reload();return;}}catch{}setTimeout(check,3000);}; setTimeout(check,5000); }
+
+        // ─── SQL Console ───
+        function openSqlConsole() { document.getElementById('sql-modal').classList.remove('hidden'); document.getElementById('sql-modal').classList.add('flex'); }
+        function closeSqlConsole() { document.getElementById('sql-modal').classList.add('hidden'); document.getElementById('sql-modal').classList.remove('flex'); }
+        function loadSqlPreset() { const s=document.getElementById('sql-presets'); if(s.value){document.getElementById('sql-query').value=s.value;s.value='';} }
+        function clearSqlResults() { document.getElementById('sql-results').innerHTML=''; document.getElementById('sql-status').textContent=''; document.getElementById('sql-confirm').classList.add('hidden'); }
+        async function executeSql(confirmed=false) {
+            const query=document.getElementById('sql-query').value.trim(); if(!query)return;
+            document.getElementById('sql-status').textContent='Ejecutando...'; document.getElementById('sql-confirm').classList.add('hidden');
+            try { const res=await fetch(window.location.origin+'/api/dashboard/sql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query,confirmed})}); const data=await res.json();
+                if(data.requiresConfirmation){document.getElementById('sql-confirm').classList.remove('hidden');document.getElementById('sql-status').textContent='Requiere confirmacion';return;}
+                if(data.error){document.getElementById('sql-status').textContent='Error';document.getElementById('sql-results').innerHTML=`<div class="text-red-400 p-3 bg-red-900 rounded">${data.error}</div>`;return;}
+                if(data.queryType==='SELECT'||data.queryType==='PRAGMA'){const cols=data.columns||[],rows=data.rows||[];let h=`<p class="text-sm text-gray-400 mb-2">${rows.length} fila(s)${data.truncated?' (max 500)':''}</p>`;
+                    if(cols.length>0){h+='<table class="w-full text-sm border-collapse"><thead><tr>';cols.forEach(c=>h+=`<th class="border border-gray-600 px-2 py-1 bg-gray-700 text-left">${c}</th>`);h+='</tr></thead><tbody>';
+                    rows.forEach(r=>{h+='<tr>';cols.forEach(c=>{const v=r[c]!==null&&r[c]!==undefined?String(r[c]):'<span class="text-gray-500">NULL</span>';h+=`<td class="border border-gray-700 px-2 py-1 font-mono text-xs">${v}</td>`;});h+='</tr>';});h+='</tbody></table>';}
+                    document.getElementById('sql-results').innerHTML=h;document.getElementById('sql-status').textContent=`${rows.length} resultado(s)`;
+                }else{document.getElementById('sql-results').innerHTML=`<div class="text-green-400 p-3 bg-green-900 rounded">${data.queryType}: ${data.rowsAffected} fila(s) afectada(s)</div>`;document.getElementById('sql-status').textContent='OK';}
+            }catch(err){document.getElementById('sql-status').textContent='Error';document.getElementById('sql-results').innerHTML=`<div class="text-red-400">${err.message}</div>`;}
+        }
+
+        setupRefreshToggle();
+        fetchDashboardData();
         loadHistory(1);
         loadNotifications(1);
         loadConnectivity(1);
         loadNetworkHistory(1);
+        loadNetworkDevices();
         // No auto-refresh por defecto (modo manual activo)
     </script>
 </body>
