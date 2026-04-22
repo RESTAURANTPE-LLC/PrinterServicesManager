@@ -1205,6 +1205,8 @@
                                     <th class="p-2 text-left">MAC</th>
                                     <th class="p-2 text-left">Transición</th>
                                     <th class="p-2 text-left">Detalle</th>
+                                    <th class="p-2 text-left">Respuesta DLE EOT</th>
+                                    <th class="p-2 text-left">Leyenda</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1216,6 +1218,8 @@
                                         <td class="p-2 font-mono text-xs">${item.macAddress || '-'}</td>
                                         <td class="p-2">${getTransitionBadge(item.estadoAnterior, item.estadoNuevo)}</td>
                                         <td class="p-2 text-xs text-gray-300">${item.detalle || '-'}</td>
+                                        <td class="p-2 font-mono text-xs text-yellow-300" title="${(item.printerResponse || '').replace(/"/g, '&quot;')}">${item.printerResponse || '-'}</td>
+                                        <td class="p-2 text-xs text-gray-200" title="${(item.printerResponseLegend || '').replace(/"/g, '&quot;')}">${item.printerResponseLegend || '-'}</td>
                                     </tr>
                                 `).join('')}
                             </tbody>

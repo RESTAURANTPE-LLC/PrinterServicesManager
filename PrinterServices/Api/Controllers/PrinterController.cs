@@ -504,10 +504,22 @@ namespace PrinterServices.Api.Controllers
                             // UPDATE selectivo: solo ip/nombre/puerto/mac_address — NO pisar estado que maneja StatusMonitor.
                             // RAZÓN: _db.Update(existing) reescribiría toda la fila, incluyendo estado_online que pudo
                             // haber cambiado entre el SELECT (línea ~424) y este punto (race con StatusMonitor).
-                            _db.Execute(
-                                "UPDATE printers SET ip = ?, nombre = ?, puerto = ?, mac_address = ? WHERE impresora_id = ?",
-                                existing.Ip, existing.Nombre, existing.Puerto, existing.MacAddress, existing.ImpresoraId);
-                            updatedCount++; // Incrementar contador de actualizados
+                            // Wrapper para UNIQUE constraint en mac_address: si otra impresora se llevó la MAC
+                            // entre el dedup-check y este UPDATE (race con PrinterMacEnricher u otro SyncPrinters
+                            // concurrente), recuperamos sin propagar excepción.
+                            try
+                            {
+                                _db.Execute(
+                                    "UPDATE printers SET ip = ?, nombre = ?, puerto = ?, mac_address = ? WHERE impresora_id = ?",
+                                    existing.Ip, existing.Nombre, existing.Puerto, existing.MacAddress, existing.ImpresoraId);
+                                updatedCount++;
+                            }
+                            catch (Exception updEx) when (IsMacUniqueViolation(updEx))
+                            {
+                                if (TryRecoverMacRace(existing.MacAddress, dto)) updatedCount++;
+                                else Log.WarnFormat("[PRINTER-SYNC] UNIQUE en UPDATE para {0} (MAC {1}), sin racer recuperable: {2}",
+                                    dto.impresora_id, existing.MacAddress, updEx.Message);
+                            }
 
                             Log.DebugFormat("[PRINTER-SYNC] Actualizada: {0} ({1}) → {2}",
                                 dto.impresora_id, dto.nombre, dto.ip); // Log de actualización
@@ -559,11 +571,22 @@ namespace PrinterServices.Api.Controllers
                                 }
                             }
 
-                            _db.Insert(newPrinter); // Ejecutar INSERT en BD
-                            insertedCount++; // Incrementar contador de insertados
-
-                            Log.InfoFormat("[PRINTER-SYNC] Insertada: {0} ({1}) → {2}",
-                                dto.impresora_id, dto.nombre, dto.ip); // Log de inserción
+                            // Wrapper para UNIQUE constraint en mac_address: si otra impresora se llevó la MAC
+                            // entre el dedup-check y este INSERT (race con PrinterMacEnricher u otro SyncPrinters),
+                            // recuperamos actualizando esa fila con los datos del dto en vez de propagar excepción.
+                            try
+                            {
+                                _db.Insert(newPrinter);
+                                insertedCount++;
+                                Log.InfoFormat("[PRINTER-SYNC] Insertada: {0} ({1}) → {2}",
+                                    dto.impresora_id, dto.nombre, dto.ip);
+                            }
+                            catch (Exception insEx) when (IsMacUniqueViolation(insEx))
+                            {
+                                if (TryRecoverMacRace(newPrinter.MacAddress, dto)) updatedCount++;
+                                else Log.WarnFormat("[PRINTER-SYNC] UNIQUE en INSERT para {0} (MAC {1}), sin racer recuperable: {2}",
+                                    dto.impresora_id, newPrinter.MacAddress, insEx.Message);
+                            }
                         }
                     }
                     catch(Exception ex)
@@ -643,6 +666,52 @@ namespace PrinterServices.Api.Controllers
                 return token.ToString();
             }
             return null;
+        }
+
+        /// <summary>
+        /// Detecta si una excepción es UNIQUE constraint failed específicamente sobre printers.mac_address.
+        /// Se usa en los wrappers de INSERT/UPDATE para distinguir el race de duplicado de MAC
+        /// (recuperable) de cualquier otro error de BD (no recuperable, debe propagar).
+        /// Match por mensaje (no por tipo) porque PSQLite.SQLiteException no está en using
+        /// y para tolerar diferencias de versión del wrapper de SQLite.
+        /// </summary>
+        private static bool IsMacUniqueViolation(Exception ex)
+        {
+            if (ex == null || ex.Message == null) return false;
+            return ex.Message.IndexOf("UNIQUE constraint", StringComparison.OrdinalIgnoreCase) >= 0
+                && ex.Message.IndexOf("mac_address", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        /// <summary>
+        /// Recupera el race "MAC fue tomada por otra impresora entre el dedup-check y la operación".
+        /// Busca la fila ganadora (la que retiene la MAC en BD) y le aplica ip/nombre/puerto del dto
+        /// vía UPDATE selectivo, dejando el catálogo consistente sin propagar excepción.
+        ///
+        /// Retorna true si encontró y actualizó la fila ganadora; false si no hubo racer (caso raro:
+        /// la MAC pudo haber desaparecido entre la falla y este check, ej: enricher la nulleó).
+        /// </summary>
+        private bool TryRecoverMacRace(string conflictingMac, PrinterSyncDto dto)
+        {
+            if (string.IsNullOrEmpty(conflictingMac)) return false;
+
+            var winner = _db.Query<PrinterEntity>(
+                "SELECT * FROM printers WHERE mac_address = ?", conflictingMac).FirstOrDefault();
+            if (winner == null || winner.ImpresoraId == dto.impresora_id) return false;
+
+            // Aplicar datos del dto a la fila ganadora — IP solo si la ganadora está OFFLINE
+            // (misma regla que en el flujo principal).
+            string newIp = (winner.EstadoOnline != 1 && !string.IsNullOrEmpty(dto.ip)) ? dto.ip : winner.Ip;
+            string newName = dto.nombre ?? winner.Nombre;
+            int newPort = dto.puerto > 0 ? dto.puerto : winner.Puerto;
+
+            _db.Execute(
+                "UPDATE printers SET ip = ?, nombre = ?, puerto = ? WHERE impresora_id = ?",
+                newIp, newName, newPort, winner.ImpresoraId);
+
+            Log.WarnFormat("[PRINTER-SYNC] Race MAC {0}: ya estaba tomada por {1} ({2}) entre dedup-check y operación → datos del dto {3} aplicados a {1}",
+                conflictingMac, winner.ImpresoraId, winner.Nombre, dto.impresora_id);
+
+            return true;
         }
     }
 }

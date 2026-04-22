@@ -302,12 +302,24 @@ namespace PrinterServices.Workers
             DateTime startedAt = DateTime.Now;
             timingBuilder.Started(startedAt);
 
+            // ═════════════════════════════════════════════════════════════════════
+            // PORT LOCK: serializa TODO acceso TCP al port de esta impresora física
+            // (pre-check DLE EOT + send del bitmap + wait post-print). Sin esto, el
+            // StatusMonitor background (o otro job) puede abrir una 2a conexión a port
+            // 9100 y las impresoras ESC/POS económicas mezclan los bytes de ambos
+            // sockets en su buffer de entrada, truncando el ticket en cualquier punto.
+            // ═════════════════════════════════════════════════════════════════════
+            string printerResponseRaw = "";
+            var portLock = await Core.Network.PrinterPortLock.AcquireAsync(effectiveIp, ct);
+            try
+            {
+
             // Pre-check: verificar si la impresora está online (usando IP efectiva resuelta por MAC)
             var printerStatus = await Monitoring.PrinterStatusChecker.CheckAsync(
                 effectiveIp, port, connectTimeoutMs, ct);
 
             // ======[ PRINTER_RESPONSE ]====== Guardar respuesta DLE EOT raw para diagnóstico
-            string printerResponseRaw = printerStatus.RawStatus ?? (printerStatus.Online ? "TCP_OK_NO_DLE" : "OFFLINE:" + (printerStatus.ErrorMessage ?? "sin respuesta"));
+            printerResponseRaw = printerStatus.RawStatus ?? (printerStatus.Online ? "TCP_OK_NO_DLE" : "OFFLINE:" + (printerStatus.ErrorMessage ?? "sin respuesta"));
             job.PrinterResponse = printerResponseRaw;
             try
             {
@@ -421,8 +433,17 @@ namespace PrinterServices.Workers
                         var failedTiming = timingBuilder.Completed(DateTime.Now, false, "Envío falló después de reintentos").Build();
                         _latencyMeasurement.RecordPrintLatency(failedTiming);
                     }
-                    return; // Ya se manejó el failure
+                    return; // Ya se manejó el failure (el finally libera el port lock)
                 }
+            }
+
+            }
+            finally
+            {
+                // Libera el port lock: el wait post-print dentro de SendWithRetryInstrumented
+                // ya corrió en cada copia, así que es seguro permitir acceso concurrente a la
+                // impresora (StatusMonitor u otros jobs) a partir de acá.
+                portLock.Dispose();
             }
 
             // FASE 8: Completar timing exitoso

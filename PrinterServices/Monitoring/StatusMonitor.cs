@@ -309,8 +309,28 @@ namespace PrinterServices.Monitoring
                         // ═══════════════════════════════════════════════════════════
                         // IMPRESORA RED: verificar por IP (comportamiento existente)
                         // ═══════════════════════════════════════════════════════════
-                        dleStatus = await PrinterStatusChecker.CheckAsync(
-                            printer.Ip, printer.Puerto, checkTimeoutMs, ct);
+                        // PORT LOCK: intentar adquirir el lock de la IP de esta impresora.
+                        // Si PrintWorker está imprimiendo ahora mismo, se skippea el check
+                        // de este ciclo — el próximo ciclo (en StatusCheckIntervalSeconds)
+                        // volverá a intentar. Evita colisionar con el bitmap en curso.
+                        int portLockTimeoutMs = ConfigManager.Instance.GetInt("StatusCheckPortLockTimeoutMs", 1500);
+                        var portLock = await Core.Network.PrinterPortLock.TryAcquireAsync(
+                            printer.Ip, portLockTimeoutMs, ct);
+                        if (portLock == null)
+                        {
+                            Log.DebugFormat("[MONITOR] {0} ({1}) — port lock ocupado (print en curso), check salteado este ciclo",
+                                printer.Nombre ?? printer.ImpresoraId, printer.Ip);
+                            continue; // Próxima iteración del foreach de impresoras
+                        }
+                        try
+                        {
+                            dleStatus = await PrinterStatusChecker.CheckAsync(
+                                printer.Ip, printer.Puerto, checkTimeoutMs, ct);
+                        }
+                        finally
+                        {
+                            portLock.Dispose();
+                        }
                     }
 
                     // Variable para resultado final (puede ser DLE EOT o SNMP)
@@ -472,7 +492,7 @@ namespace PrinterServices.Monitoring
                             printer.Nombre ?? printer.ImpresoraId, printer.Ip);
                         
                         // Registrar transición en printer_status_log
-                        LogStatusTransition(printer, "OFFLINE", "ONLINE", "Conectividad restaurada");
+                        LogStatusTransition(printer, "OFFLINE", "ONLINE", "Conectividad restaurada", status.RawStatus);
                         
                         // ★ CANCELAR búsqueda ARP si estaba en progreso (ya no es necesaria)
                         _arpWorker?.CancelScan(printer.ImpresoraId);
@@ -502,7 +522,7 @@ namespace PrinterServices.Monitoring
                             printer.Nombre ?? printer.ImpresoraId, printer.Ip);
                         
                         // Registrar transición en printer_status_log
-                        LogStatusTransition(printer, "ONLINE", "OFFLINE", "Perdió conectividad de red");
+                        LogStatusTransition(printer, "ONLINE", "OFFLINE", "Perdió conectividad de red", status.RawStatus);
                         
                         // ★ DELEGAR búsqueda ARP a worker independiente (NO BLOQUEAR)
                         // ArpScanWorker procesará async en su propio hilo (~500ms)
@@ -539,7 +559,7 @@ namespace PrinterServices.Monitoring
                             printer.Nombre ?? printer.ImpresoraId, printer.Ip);
                         
                         // Registrar transición en printer_status_log
-                        LogStatusTransition(printer, "NO_DISPONIBLE", "DISPONIBLE", "Disponible para imprimir");
+                        LogStatusTransition(printer, "NO_DISPONIBLE", "DISPONIBLE", "Disponible para imprimir", status.RawStatus);
                         RequeueWaitingJobs(printer.ImpresoraId);
                         NotifyPrinterChange(printer.ImpresoraId, printer.Nombre,
                             NotificationType.Online, "Impresora disponible para imprimir");
@@ -553,7 +573,7 @@ namespace PrinterServices.Monitoring
                             printer.Nombre ?? printer.ImpresoraId, printer.Ip, razon);
 
                         // Registrar transición en printer_status_log
-                        LogStatusTransition(printer, "DISPONIBLE", "NO_DISPONIBLE", razon);
+                        LogStatusTransition(printer, "DISPONIBLE", "NO_DISPONIBLE", razon, status.RawStatus);
 
                         if (!status.TienePapel)
                         {
@@ -712,12 +732,15 @@ namespace PrinterServices.Monitoring
 
         /// <summary>
         /// Registra una transición de estado de impresora en printer_status_log.
-        /// RAZÓN: Generar reporte de disponibilidad (a qué hora se desconectó, a qué hora volvió).
+        /// RAZÓN: Generar reporte de disponibilidad con timestamps + raw DLE EOT + leyenda
+        /// human-readable de qué dijo la impresora al momento del check.
         /// </summary>
-        private void LogStatusTransition(PrinterEntity printer, string estadoAnterior, string estadoNuevo, string detalle)
+        /// <param name="printerResponseRaw">Raw del check (ej: "P:12 O:00 E:00 S:00" o "OFFLINE:..."). Si null/empty, se guarda como "Sin respuesta".</param>
+        private void LogStatusTransition(PrinterEntity printer, string estadoAnterior, string estadoNuevo, string detalle, string printerResponseRaw)
         {
             try
             {
+                string legend = PrinterStatusChecker.Explain(printerResponseRaw);
                 var logEntry = new PrinterStatusLogEntity
                 {
                     ImpresoraId = printer.ImpresoraId,
@@ -727,6 +750,8 @@ namespace PrinterServices.Monitoring
                     EstadoAnterior = estadoAnterior,
                     EstadoNuevo = estadoNuevo,
                     Detalle = detalle,
+                    PrinterResponse = printerResponseRaw,
+                    PrinterResponseLegend = legend,
                     Fecha = DateTime.Now.ToString("o")
                 };
                 _db.Insert(logEntry);

@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(awk '/idx_printers_mac/,/CREATE UNIQUE INDEX/' /Users/lcastagnino/Documents/Windows/sourcecode/printerservices/PrinterServices/Data/PrinterServiceDb.cs)",
+      "Bash(curl -sL \"https://reference.epson-biz.com/pos/reference_en/\" -A \"Mozilla/5.0\")",
+      "Bash(curl -sL \"https://www.epson-biz.com/modules/pos/index.php?page=single_soft&spec=TM-T20III\" -A \"Mozilla/5.0\")",
+      "WebSearch",
+      "WebFetch(domain:files.support.epson.com)",
+      "Bash(python3 -c \"import pypdf; print\\(pypdf.__version__\\)\")",
+      "Bash(brew list *)",
+      "Bash(python3 -m pip install --quiet --user pypdf)",
+      "WebFetch(domain:download4.epson.biz)"
+    ]
+  }
+}

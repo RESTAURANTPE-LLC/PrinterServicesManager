@@ -452,6 +452,14 @@ namespace PrinterServices.Config
                     Key = "PostPrintWaitMaxMs", Value = "4000", DefaultValue = "4000",
                     Description = "Techo de seguridad de la espera post-send en ms. Protege contra estimaciones excesivas en tickets muy largos con mucho negro.",
                     Category = "timing", ValueType = "int", MinValue = "0", MaxValue = "60000"
+                },
+
+                // ── Port lock: cuánto espera StatusMonitor por el lock de una impresora antes de skipear el ciclo ──
+                new ConfigSettingEntity
+                {
+                    Key = "StatusCheckPortLockTimeoutMs", Value = "1500", DefaultValue = "1500",
+                    Description = "Tiempo máximo en ms que StatusMonitor espera el port lock de una impresora antes de salt el check de este ciclo. Bajarlo si el check de estado empieza a tardar; subirlo si hay muchos checks salteados.",
+                    Category = "timing", ValueType = "int", MinValue = "100", MaxValue = "30000"
                 }
             };
 

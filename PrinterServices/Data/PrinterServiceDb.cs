@@ -295,6 +295,40 @@ namespace PrinterServices.Data
                 Log.Warn("[DB] Error en migración diseñador comandas (print_jobs): " + ex.Message);
             }
 
+            // Migración: columnas printer_response + printer_response_legend en printer_status_log
+            // RAZÓN: Cada transición ahora persiste el raw DLE EOT y su decodificación humana
+            // para diagnóstico (qué dijo la impresora exactamente al momento del evento).
+            try
+            {
+                var statusLogCols = Query<dynamic>("PRAGMA table_info(printer_status_log)");
+                bool hasPrinterResponse = false;
+                bool hasPrinterResponseLegend = false;
+                foreach (var col in statusLogCols)
+                {
+                    var colDict = col as System.Collections.Generic.IDictionary<string, object>;
+                    if (colDict != null && colDict.ContainsKey("name"))
+                    {
+                        string colName = colDict["name"].ToString();
+                        if (colName == "printer_response") hasPrinterResponse = true;
+                        else if (colName == "printer_response_legend") hasPrinterResponseLegend = true;
+                    }
+                }
+                if (!hasPrinterResponse)
+                {
+                    Execute("ALTER TABLE printer_status_log ADD COLUMN printer_response TEXT");
+                    Log.Info("[DB] Columna 'printer_response' agregada a tabla printer_status_log");
+                }
+                if (!hasPrinterResponseLegend)
+                {
+                    Execute("ALTER TABLE printer_status_log ADD COLUMN printer_response_legend TEXT");
+                    Log.Info("[DB] Columna 'printer_response_legend' agregada a tabla printer_status_log");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("[DB] Error en migración printer_response (printer_status_log): " + ex.Message);
+            }
+
             // Crear índices adicionales
             try
             {

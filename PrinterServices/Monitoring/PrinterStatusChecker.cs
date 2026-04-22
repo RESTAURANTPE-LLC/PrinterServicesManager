@@ -347,6 +347,69 @@ namespace PrinterServices.Monitoring
             return Task.FromResult(SendAndReceiveByteSync(socket, command, timeoutMs));
         }
 
+        /// <summary>
+        /// Decodifica el RawStatus (string formato "P:XX O:XX E:XX S:XX" o markers como
+        /// "TCP_OK_NO_DLE", "OFFLINE:...") a una leyenda human-readable que explica qué
+        /// dijo la impresora. Se usa al persistir transiciones en printer_status_log para
+        /// que el reporte de conectividad muestre el detalle real, no solo "OFFLINE".
+        ///
+        /// Reglas de decode (Epson TM estándar):
+        /// - DLE EOT 1 (P): bit 3 = no lista
+        /// - DLE EOT 2 (O): bit 2 = tapa abierta, bit 5 = parado por papel/error
+        /// - DLE EOT 3 (E): bit 6 = error recuperable, bit 5 = error no recuperable, bit 3 = corte automático
+        /// - DLE EOT 4 (S): bits 5,6 = sin papel (00 = OK)
+        /// </summary>
+        public static string Explain(string rawStatus)
+        {
+            if (string.IsNullOrEmpty(rawStatus)) return "Sin respuesta de la impresora";
+
+            // Markers conocidos del propio CheckAsync
+            if (rawStatus.IndexOf("TCP_OK_NO_DLE", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "TCP responde pero la impresora NO contesta DLE EOT (puede ser un print server, un dispositivo en port 9100 que no es ESC/POS, o un modelo que no soporta DLE EOT)";
+            if (rawStatus.IndexOf("TCP_OK_DLE_INVALIDO", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "TCP responde pero DLE EOT devolvió bytes que no cumplen la máscara Epson (impresora con emulación no estándar o respondiendo basura)";
+            if (rawStatus.StartsWith("OFFLINE:", StringComparison.OrdinalIgnoreCase))
+                return "Impresora no alcanzable por TCP (port 9100): " + rawStatus.Substring("OFFLINE:".Length).Trim();
+
+            // Parsear "P:XX O:XX E:XX S:XX"
+            byte p, o, e, s;
+            if (!TryParseDleEot(rawStatus, out p, out o, out e, out s))
+                return "Respuesta sin parsear: " + rawStatus;
+
+            var problemas = new System.Collections.Generic.List<string>();
+            if ((p & 0x08) != 0) problemas.Add("ocupada/no lista (P bit 3)");
+            if ((o & 0x04) != 0) problemas.Add("tapa abierta (O bit 2)");
+            if ((o & 0x20) != 0) problemas.Add("impresión detenida por papel/error (O bit 5)");
+            if ((e & 0x40) != 0) problemas.Add("error recuperable (E bit 6)");
+            if ((e & 0x20) != 0) problemas.Add("error NO recuperable (E bit 5)");
+            if ((e & 0x08) != 0) problemas.Add("error de corte automático (E bit 3)");
+            if ((s & 0x60) != 0) problemas.Add("sin papel o por terminarse (S bits 5,6)");
+
+            if (problemas.Count == 0)
+                return "Lista para imprimir (online, con papel, tapa cerrada, sin errores)";
+            return "Problemas: " + string.Join(" + ", problemas.ToArray());
+        }
+
+        /// <summary>
+        /// Parsea "P:XX O:XX E:XX S:XX" (XX = hex) a 4 bytes. Tolera espacios y sufijos
+        /// como "[TCP_OK_NO_DLE]". Retorna false si el formato no matchea.
+        /// </summary>
+        private static bool TryParseDleEot(string raw, out byte p, out byte o, out byte e, out byte s)
+        {
+            p = o = e = s = 0;
+            if (string.IsNullOrEmpty(raw)) return false;
+
+            var match = System.Text.RegularExpressions.Regex.Match(
+                raw,
+                @"P\s*:\s*([0-9A-Fa-f]{1,2})\s+O\s*:\s*([0-9A-Fa-f]{1,2})\s+E\s*:\s*([0-9A-Fa-f]{1,2})\s+S\s*:\s*([0-9A-Fa-f]{1,2})");
+            if (!match.Success) return false;
+
+            return byte.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.HexNumber, null, out p)
+                && byte.TryParse(match.Groups[2].Value, System.Globalization.NumberStyles.HexNumber, null, out o)
+                && byte.TryParse(match.Groups[3].Value, System.Globalization.NumberStyles.HexNumber, null, out e)
+                && byte.TryParse(match.Groups[4].Value, System.Globalization.NumberStyles.HexNumber, null, out s);
+        }
+
         private static byte SendAndReceiveByteSync(Socket socket, byte[] command, int timeoutMs)
         {
             // Limpiar buffer de recepción antes de enviar (evitar datos residuales de comandos previos)

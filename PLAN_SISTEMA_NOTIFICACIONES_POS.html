@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plan Tecnico - Sistema de Notificaciones Bidireccional POS</title>
+<style>
+@page { size: A4; margin: 20mm 15mm 20mm 15mm; }
+@media print {
+  body { font-size: 11pt; }
+  .page-break { page-break-before: always; }
+  .no-break { page-break-inside: avoid; }
+  nav { display: none; }
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1a1a2e; line-height: 1.6; max-width: 210mm; margin: 0 auto; padding: 20px 30px; background: #fff; }
+h1 { font-size: 1.8em; color: #0f3460; border-bottom: 3px solid #0f3460; padding-bottom: 8px; margin: 30px 0 15px 0; }
+h2 { font-size: 1.4em; color: #16213e; border-bottom: 2px solid #e94560; padding-bottom: 5px; margin: 25px 0 12px 0; }
+h3 { font-size: 1.15em; color: #1a1a2e; margin: 18px 0 8px 0; }
+h4 { font-size: 1em; color: #533483; margin: 12px 0 6px 0; }
+p { margin: 8px 0; text-align: justify; }
+ul, ol { margin: 8px 0 8px 25px; }
+li { margin: 4px 0; }
+table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.92em; }
+th { background: #0f3460; color: #fff; padding: 8px 10px; text-align: left; font-weight: 600; }
+td { padding: 7px 10px; border: 1px solid #ddd; }
+tr:nth-child(even) { background: #f8f9fa; }
+pre { background: #1e1e2e; color: #cdd6f4; padding: 14px; border-radius: 6px; overflow-x: auto; font-size: 0.88em; line-height: 1.5; margin: 10px 0; }
+code { font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace; }
+.inline-code { background: #e8eaf6; color: #283593; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+.cover { text-align: center; padding: 80px 20px; min-height: 500px; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+.cover h1 { font-size: 2.4em; border: none; color: #0f3460; }
+.cover .subtitle { font-size: 1.3em; color: #533483; margin: 10px 0; }
+.cover .meta { color: #666; margin: 5px 0; font-size: 1em; }
+.cover .logo { font-size: 3em; margin-bottom: 20px; }
+.badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.82em; font-weight: 600; }
+.badge-ok { background: #d4edda; color: #155724; }
+.badge-warn { background: #fff3cd; color: #856404; }
+.badge-err { background: #f8d7da; color: #721c24; }
+.badge-info { background: #d1ecf1; color: #0c5460; }
+.highlight-box { background: #eef2ff; border-left: 4px solid #0f3460; padding: 12px 16px; margin: 12px 0; border-radius: 0 6px 6px 0; }
+.warn-box { background: #fff8e1; border-left: 4px solid #f57f17; padding: 12px 16px; margin: 12px 0; border-radius: 0 6px 6px 0; }
+.decision-box { background: #e8f5e9; border-left: 4px solid #2e7d32; padding: 12px 16px; margin: 12px 0; border-radius: 0 6px 6px 0; }
+.file-tree { background: #f5f5f5; padding: 14px; border-radius: 6px; font-family: 'Cascadia Code', Consolas, monospace; font-size: 0.9em; line-height: 1.7; white-space: pre; margin: 10px 0; }
+.toc { background: #f8f9fa; padding: 20px 30px; border-radius: 8px; margin: 20px 0; }
+.toc a { color: #0f3460; text-decoration: none; }
+.toc a:hover { text-decoration: underline; }
+.toc ol { counter-reset: toc-counter; list-style: none; margin-left: 0; }
+.toc > ol > li { counter-increment: toc-counter; margin: 6px 0; }
+.toc > ol > li::before { content: counter(toc-counter) ". "; font-weight: 700; color: #e94560; }
+.toc ol ol { margin-left: 20px; margin-top: 4px; }
+.flow-diagram { background: #fafafa; border: 1px solid #e0e0e0; padding: 16px; border-radius: 8px; font-family: Consolas, monospace; font-size: 0.85em; line-height: 1.6; white-space: pre; overflow-x: auto; margin: 12px 0; }
+.section-num { color: #e94560; font-weight: 700; }
+.kw { color: #cba6f7; }
+.str { color: #a6e3a1; }
+.cm { color: #6c7086; }
+.fn { color: #89b4fa; }
+.tp { color: #f9e2af; }
+footer { text-align: center; color: #999; font-size: 0.85em; margin-top: 40px; padding-top: 15px; border-top: 1px solid #eee; }
+</style>
+</head>
+<body>
+
+<!-- ==================== PORTADA ==================== -->
+<div class="cover">
+<div class="logo">&#128268;</div>
+<h1>Sistema de Notificaciones Bidireccional POS</h1>
+<div class="subtitle">Plan de Implementacion Tecnico</div>
+<div class="subtitle" style="font-size:1em; color:#e94560;">QuipuNetX &mdash; Arquitectura &amp; Desarrollo</div>
+<br>
+<div class="meta"><strong>Proyecto:</strong> QuipuNet / QuipuNetX (.NET Framework 4.5.2)</div>
+<div class="meta"><strong>Alcance:</strong> Reintentos, Trazabilidad, Dashboard, Compatibilidad Java</div>
+<div class="meta"><strong>Version:</strong> 1.0</div>
+<div class="meta"><strong>Fecha:</strong> Abril 2026</div>
+<div class="meta"><strong>Clasificacion:</strong> <span class="badge badge-info">Documento Interno</span></div>
+</div>
+
+<!-- ==================== TOC ==================== -->
+<div class="page-break"></div>
+<h1>Tabla de Contenidos</h1>
+<div class="toc">
+<ol>
+<li><a href="#s1">Resumen Ejecutivo</a></li>
+<li><a href="#s2">Diagnostico del Estado Actual</a>
+  <ol>
+  <li><a href="#s2a">Flujo POS Actual</a></li>
+  <li><a href="#s2b">Gaps Criticos Identificados</a></li>
+  <li><a href="#s2c">Entidades Existentes Relevantes</a></li>
+  </ol>
+</li>
+<li><a href="#s3">Decision Arquitectonica: Base de Datos</a></li>
+<li><a href="#s4">Modelo de Datos</a>
+  <ol>
+  <li><a href="#s4a">Nueva Tabla: notificacion</a></li>
+  <li><a href="#s4b">Extension de transaccionordenpedido</a></li>
+  <li><a href="#s4c">Diagrama de Relaciones</a></li>
+  <li><a href="#s4d">Veredicto sobre transaccionordenpedido</a></li>
+  </ol>
+</li>
+<li><a href="#s5">Arquitectura SOLID del Sistema</a>
+  <ol>
+  <li><a href="#s5a">Arbol de Archivos</a></li>
+  <li><a href="#s5b">Interfaces y Contratos</a></li>
+  <li><a href="#s5c">Diagrama de Capas</a></li>
+  </ol>
+</li>
+<li><a href="#s6">Plan de Implementacion por Fases</a>
+  <ol>
+  <li><a href="#f0">Fase 0: Contratos y Modelos</a></li>
+  <li><a href="#f1">Fase 1: Entidades y BD</a></li>
+  <li><a href="#f2">Fase 2: Servicio de Notificaciones</a></li>
+  <li><a href="#f3">Fase 3: Controller y Server</a></li>
+  <li><a href="#f4">Fase 4: Integracion con OrdenpedidoController</a></li>
+  <li><a href="#f5">Fase 5: Contratos REST Java</a></li>
+  <li><a href="#f6">Fase 6: Dashboard</a></li>
+  <li><a href="#f7">Fase 7: Registro e Inicializacion</a></li>
+  <li><a href="#f8">Fase 8: Tests</a></li>
+  </ol>
+</li>
+<li><a href="#s7">Mecanismo de Reintentos</a></li>
+<li><a href="#s8">Tabla de Decisiones Finales</a></li>
+<li><a href="#s9">Archivos a Crear / Modificar</a></li>
+</ol>
+</div>
+
+<!-- ==================== 1. RESUMEN ==================== -->
+<div class="page-break"></div>
+<h1 id="s1"><span class="section-num">1.</span> Resumen Ejecutivo</h1>
+<p>El sistema actual de pagos POS en QuipuNetX carece de un mecanismo robusto de notificaciones entre dispositivos. La comunicacion actual es <strong>fire-and-forget</strong>: si la notificacion HTTP al dispositivo origen falla, se pierde sin trazabilidad ni reintentos.</p>
+
+<p>Este documento propone un <strong>Sistema de Notificaciones Bidireccional</strong> que:</p>
+<ul>
+<li>Persiste cada notificacion con su payload, IPs, estado, reintentos y timestamps</li>
+<li>Implementa reintentos automaticos con backoff exponencial</li>
+<li>Permite consultar al POS el estado de transacciones pendientes</li>
+<li>Ofrece un dashboard web de trazabilidad con estadisticas en tiempo real</li>
+<li>Es reutilizable para cualquier tipo de transaccion (ordenpedido, delivery, venta)</li>
+<li>Mantiene compatibilidad con Java (QuipuPos) via contratos REST/JSON estandar</li>
+<li>Se integra en la BD SQLite existente sin nueva infraestructura</li>
+</ul>
+
+<div class="highlight-box">
+<strong>Principios aplicados:</strong> SRP (3 servicios separados), ISP (2 interfaces), OCP (tipos extensibles), DIP (inyeccion por interfaz). Compatible con .NET Framework 4.5.2.
+</div>
+
+<!-- ==================== 2. DIAGNOSTICO ==================== -->
+<div class="page-break"></div>
+<h1 id="s2"><span class="section-num">2.</span> Diagnostico del Estado Actual</h1>
+
+<h2 id="s2a">2.1 Flujo POS Actual</h2>
+<div class="flow-diagram">
+Cliente (QuipuNet/Tablet)         Servidor (QuipuNetX)           POS Fisico
+        |                                |                          |
+        |--- POST /ordenpedido/agregar-->|                          |
+        |                                |-- save ordenpedido       |
+        |                                |-- save transaccion (2)   |
+        |<-- Response {id} -------------|                          |
+        |                                |                          |
+        |                                |--- HTTP cobrar --------->|
+        |                                |                          |
+        |                                |<-- Response POS ---------|
+        |                                |                          |
+        |                                |-- generar venta          |
+        |                                |-- actualizar estado (1)  |
+        |                                |                          |
+        |<-- POST /response (payload) --|  <span style="color:#e94560;">&#9888; Fire-and-forget</span>
+        |                                |  <span style="color:#e94560;">&#9888; Sin reintentos</span>
+        |                                |  <span style="color:#e94560;">&#9888; Sin persistencia</span>
+</div>
+
+<h2 id="s2b">2.2 Gaps Criticos Identificados</h2>
+<table>
+<tr><th>Componente</th><th>Gap</th><th>Impacto</th><th>Severidad</th></tr>
+<tr>
+<td><span class="inline-code">NotificarOrigenAsync</span></td>
+<td>Fire-and-forget, sin persistencia ni reintentos</td>
+<td>Si falla el HTTP POST, la notificacion se pierde</td>
+<td><span class="badge badge-err">Critico</span></td>
+</tr>
+<tr>
+<td><span class="inline-code">Transaccionordenpedido</span></td>
+<td>Sin UUID unico, sin IP origen, sin payload, sin reintentos</td>
+<td>No se puede correlacionar unicamente con multiples POS</td>
+<td><span class="badge badge-err">Critico</span></td>
+</tr>
+<tr>
+<td><span class="inline-code">findUltimaPendientePorPosIp</span></td>
+<td>Busca por IP del POS — con N dispositivos concurrentes puede retornar la transaccion equivocada</td>
+<td>Confusion de transacciones entre dispositivos</td>
+<td><span class="badge badge-warn">Alto</span></td>
+</tr>
+<tr>
+<td><span class="inline-code">ConstruirPayloadNotificacion</span></td>
+<td>No persiste el payload enviado</td>
+<td>No se puede hacer replay ni auditoria</td>
+<td><span class="badge badge-warn">Medio</span></td>
+</tr>
+<tr>
+<td>Dashboard / Trazabilidad</td>
+<td>No existe</td>
+<td>Cero visibilidad sobre estado de transacciones POS</td>
+<td><span class="badge badge-warn">Alto</span></td>
+</tr>
+</table>
+
+<h2 id="s2c">2.3 Entidades Existentes Relevantes</h2>
+<table>
+<tr><th>Entidad</th><th>Tabla SQLite</th><th>Campos Clave</th><th>Rol</th></tr>
+<tr>
+<td><span class="inline-code">Transaccionordenpedido</span></td>
+<td>transaccionordenpedido</td>
+<td>ordenpedido_id, pos_id, transaccion_estado (1/2/3), fecha_inicio, fecha_fin, mensajerespuesta</td>
+<td>Estado de negocio de la transaccion POS</td>
+</tr>
+<tr>
+<td><span class="inline-code">Transaccionintegracion</span></td>
+<td>transaccionintegracion</td>
+<td>checksum, ip_origen, ip_pos, monto, estado, modalidadventa</td>
+<td>Transacciones del flujo PagoController (salones/delivery)</td>
+</tr>
+<tr>
+<td><span class="inline-code">Ordenpedido</span></td>
+<td>ordenpedido</td>
+<td>ordenpedido_iporigen, ordenpedido_estado, ordenpedido_tipopago</td>
+<td>Orden con referencia al dispositivo origen</td>
+</tr>
+<tr>
+<td><span class="inline-code">DeviceClient</span></td>
+<td>deviceclient</td>
+<td>deviceclient_ip, deviceclient_nombre, deviceclient_identificador, deviceclient_estadoconexion</td>
+<td>Registro de dispositivos conectados</td>
+</tr>
+</table>
+
+<!-- ==================== 3. DECISION BD ==================== -->
+<div class="page-break"></div>
+<h1 id="s3"><span class="section-num">3.</span> Decision Arquitectonica: Base de Datos</h1>
+
+<div class="decision-box">
+<h3>&#10003; Decision: Usar la BD SQLite existente de QuipuNetX</h3>
+</div>
+
+<table>
+<tr><th>Criterio</th><th>BD Existente</th><th>BD Nueva (descartada)</th></tr>
+<tr>
+<td>JOINs con transaccionordenpedido, ordenpedido, deviceclient</td>
+<td><span class="badge badge-ok">Directo</span></td>
+<td><span class="badge badge-err">Imposible en SQLite</span></td>
+</tr>
+<tr>
+<td>Migracion</td>
+<td><span class="badge badge-ok">Auto (ALTER TABLE ADD COLUMN)</span></td>
+<td><span class="badge badge-warn">Script manual</span></td>
+</tr>
+<tr>
+<td>ORM (SugarRecord)</td>
+<td><span class="badge badge-ok">Heredado directo</span></td>
+<td><span class="badge badge-err">Nueva conexion</span></td>
+</tr>
+<tr>
+<td>Deployment</td>
+<td><span class="badge badge-ok">Cero cambios</span></td>
+<td><span class="badge badge-warn">Nuevo archivo .db</span></td>
+</tr>
+<tr>
+<td>Sincronizacion</td>
+<td><span class="badge badge-ok">Misma transaccion</span></td>
+<td><span class="badge badge-err">2-phase commit</span></td>
+</tr>
+</table>
+
+<p><strong>Justificacion:</strong> Las notificaciones necesitan correlacionarse con <span class="inline-code">transaccionordenpedido</span>, <span class="inline-code">ordenpedido</span> y <span class="inline-code">deviceclient</span>. En SQLite embedded, cross-DB JOINs no son viables. Una segunda BD solo agrega complejidad sin beneficio.</p>
+
+<!-- ==================== 4. MODELO DE DATOS ==================== -->
+<div class="page-break"></div>
+<h1 id="s4"><span class="section-num">4.</span> Modelo de Datos</h1>
+
+<h2 id="s4a">4.1 Nueva Tabla: <span class="inline-code">notificacion</span></h2>
+<pre><code><span class="kw">CREATE TABLE IF NOT EXISTS</span> notificacion (
+    ID                      <span class="tp">INTEGER</span> <span class="kw">PRIMARY KEY AUTOINCREMENT</span>,
+    NOTIFICACIONID          <span class="tp">TEXT</span>    <span class="kw">NOT NULL UNIQUE</span>,      <span class="cm">-- UUID v4</span>
+    TIPNOTIFICACION         <span class="tp">TEXT</span>    <span class="kw">NOT NULL</span>,              <span class="cm">-- "ordenpedido"|"delivery"|"venta"</span>
+    IDENTIFICADORASOCIADO   <span class="tp">TEXT</span>    <span class="kw">NOT NULL</span>,              <span class="cm">-- UUID del registro asociado</span>
+    IPORIGEN                <span class="tp">TEXT</span>,                              <span class="cm">-- IP dispositivo cliente</span>
+    IPDESTINO               <span class="tp">TEXT</span>,                              <span class="cm">-- IP del POS destino</span>
+    NOMBREDISPOSITIVO       <span class="tp">TEXT</span>,                              <span class="cm">-- Nombre del dispositivo origen</span>
+    TIPOPAGO                <span class="tp">TEXT</span>,                              <span class="cm">-- "izipay"|"credibanco"|"niubiz"</span>
+    ESTADONOTIFICACION      <span class="tp">TEXT</span>    <span class="kw">NOT NULL DEFAULT</span> <span class="str">'1'</span>, <span class="cm">-- 1=pendiente 2=completada 3=error 4=timeout</span>
+    FECHACREACION           <span class="tp">TEXT</span>    <span class="kw">NOT NULL</span>,
+    FECHARESPUESTA          <span class="tp">TEXT</span>,                              <span class="cm">-- Cuando respondio el destino</span>
+    CANTIDADREINTENTOS      <span class="tp">INTEGER</span> <span class="kw">NOT NULL DEFAULT</span> 0,
+    PAYLOADENVIO            <span class="tp">TEXT</span>,                              <span class="cm">-- JSON body enviado (para replay)</span>
+    MENSAJERESPUESTA        <span class="tp">TEXT</span>,                              <span class="cm">-- Respuesta del POS</span>
+    VENTAID                 <span class="tp">TEXT</span>                               <span class="cm">-- Venta generada si exitosa</span>
+);</code></pre>
+
+<h2 id="s4b">4.2 Extension de <span class="inline-code">transaccionordenpedido</span></h2>
+<pre><code><span class="cm">-- SQLite-net auto-agrega columnas al detectar campos nuevos en la entidad:</span>
+<span class="kw">ALTER TABLE</span> transaccionordenpedido <span class="kw">ADD COLUMN</span> TRANSACCIONORDENPEDIDOID <span class="tp">TEXT</span>;  <span class="cm">-- UUID unico</span>
+<span class="kw">ALTER TABLE</span> transaccionordenpedido <span class="kw">ADD COLUMN</span> NOTIFICACIONID <span class="tp">TEXT</span>;            <span class="cm">-- FK a notificacion</span>
+<span class="kw">ALTER TABLE</span> transaccionordenpedido <span class="kw">ADD COLUMN</span> IPORIGEN <span class="tp">TEXT</span>;                 <span class="cm">-- IP cliente origen</span></code></pre>
+
+<div class="highlight-box">
+<strong>Migracion zero-downtime:</strong> SQLite-net agrega columnas automaticamente via <span class="inline-code">ALTER TABLE ADD COLUMN</span> al detectar el campo nuevo en la entidad C#. No requiere scripts de migracion manuales.
+</div>
+
+<h2 id="s4c">4.3 Diagrama de Relaciones</h2>
+<div class="flow-diagram">
++---------------------+        +------------------------+        +------------------+
+|    ordenpedido      |        | transaccionordenpedido |        |   notificacion   |
+|---------------------|        |------------------------|        |------------------|
+| ID (PK)             |&lt;------| ORDENPEDIDOID          |        | ID (PK)          |
+| ORDENPEDIDOIPORIGEN |        | POSID                  |        | NOTIFICACIONID   |
+| ORDENPEDIDOESTADO   |        | TRANSACCIONESTADO      |        | TIPNOTIFICACION  |
+| ORDENPEDIDOTIPOPAGO |        | FECHAINICIO / FECHAFIN |        | ESTADONOTIFICACION|
+|                     |        | MENSAJERESPUESTA       |        | IPORIGEN/IPDESTINO|
+|                     |        |<span style="color:#a6e3a1;"> + TRANSACCIONORDENPEDIDOID (UUID)</span>|  | CANTIDADREINTENTOS|
+|                     |        |<span style="color:#a6e3a1;"> + NOTIFICACIONID --------</span>|------->| PAYLOADENVIO     |
+|                     |        |<span style="color:#a6e3a1;"> + IPORIGEN</span>              |        | VENTAID          |
++---------------------+        +------------------------+        +------------------+
+
+Relacion: 1 transaccionordenpedido &lt;--> 1..N notificacion (principal + reintentos)
+
++------------------+
+|   deviceclient   |  Se consulta por IP para obtener nombre del dispositivo
+|------------------|
+| DEVICECLIENTIP   |
+| DEVICECLIENTNOMBRE|
+| DEVICECLIENTIDENTIFICADOR|
++------------------+
+</div>
+
+<h2 id="s4d">4.4 Veredicto: &iquest;Se elimina <span class="inline-code">transaccionordenpedido</span>?</h2>
+
+<div class="decision-box">
+<h3>&#10003; NO. Se mantiene y se complementa.</h3>
+</div>
+
+<table>
+<tr><th>Tabla</th><th>Responsabilidad</th><th>Analogia</th></tr>
+<tr>
+<td><span class="inline-code">transaccionordenpedido</span></td>
+<td><strong>QUE</strong> paso con la transaccion POS (estado de negocio: pendiente / aprobado / error)</td>
+<td>El recibo de la operacion</td>
+</tr>
+<tr>
+<td><span class="inline-code">notificacion</span></td>
+<td><strong>COMO</strong> se comunico (transporte: reintentos, payload, trazabilidad bidireccional)</td>
+<td>El acuse de recibo del correo</td>
+</tr>
+</table>
+
+<!-- ==================== 5. ARQUITECTURA ==================== -->
+<div class="page-break"></div>
+<h1 id="s5"><span class="section-num">5.</span> Arquitectura SOLID del Sistema</h1>
+
+<h2 id="s5a">5.1 Arbol de Archivos Nuevos</h2>
+<div class="file-tree">QuipuNetX/
+&#9500;&#9472;&#9472; Notificaciones/
+&#9474;   &#9500;&#9472;&#9472; Domain/
+&#9474;   &#9474;   &#9500;&#9472;&#9472; EstadoNotificacion.cs        <span style="color:#a6e3a1;">// Enum: Pendiente=1, Completada=2, Error=3, Timeout=4</span>
+&#9474;   &#9474;   &#9492;&#9472;&#9472; TipoNotificacion.cs          <span style="color:#a6e3a1;">// Constantes: "ordenpedido", "delivery", "venta"</span>
+&#9474;   &#9500;&#9472;&#9472; Interfaces/
+&#9474;   &#9474;   &#9500;&#9472;&#9472; INotificacionService.cs      <span style="color:#a6e3a1;">// SRP: contrato CRUD + query</span>
+&#9474;   &#9474;   &#9492;&#9472;&#9472; IRetryPolicy.cs              <span style="color:#a6e3a1;">// ISP: politica de reintento separada</span>
+&#9474;   &#9500;&#9472;&#9472; Dto/
+&#9474;   &#9474;   &#9500;&#9472;&#9472; CrearNotificacionRequest.cs  <span style="color:#a6e3a1;">// DTO entrada</span>
+&#9474;   &#9474;   &#9500;&#9472;&#9472; RecibirRespuestaDto.cs       <span style="color:#a6e3a1;">// DTO endpoint receptor</span>
+&#9474;   &#9474;   &#9500;&#9472;&#9472; NotificacionDto.cs           <span style="color:#a6e3a1;">// DTO salida dashboard</span>
+&#9474;   &#9474;   &#9492;&#9472;&#9472; NotificacionStatsDto.cs      <span style="color:#a6e3a1;">// Estadisticas dashboard</span>
+&#9474;   &#9500;&#9472;&#9472; Services/
+&#9474;   &#9474;   &#9500;&#9472;&#9472; NotificacionService.cs       <span style="color:#a6e3a1;">// SRP: CRUD + query de notificaciones</span>
+&#9474;   &#9474;   &#9500;&#9472;&#9472; ExponentialRetryPolicy.cs    <span style="color:#a6e3a1;">// Backoff: 30s, 60s, 120s</span>
+&#9474;   &#9474;   &#9500;&#9472;&#9472; NotificacionRetryService.cs  <span style="color:#a6e3a1;">// SRP: timer background + reintentos</span>
+&#9474;   &#9474;   &#9492;&#9472;&#9472; NotificacionQueryService.cs  <span style="color:#a6e3a1;">// SRP: consultas al POS</span>
+&#9474;   &#9500;&#9472;&#9472; controller/
+&#9474;   &#9474;   &#9492;&#9472;&#9472; NotificacionController.cs    <span style="color:#a6e3a1;">// Coordinador: service + retry</span>
+&#9474;   &#9492;&#9472;&#9472; server/
+&#9474;       &#9492;&#9472;&#9472; NotificacionServer.cs        <span style="color:#a6e3a1;">// Parse JSON --> controller</span>
+&#9500;&#9472;&#9472; entitybase/
+&#9474;   &#9492;&#9472;&#9472; NotificacionBase.cs              <span style="color:#a6e3a1;">// Campos + Column + fromJSON/toJSON</span>
+&#9500;&#9472;&#9472; entity/
+&#9474;   &#9492;&#9472;&#9472; Notificacion.cs                  <span style="color:#a6e3a1;">// Hereda SugarRecord + queries</span>
+&#9492;&#9472;&#9472; ws/modules/
+    &#9492;&#9472;&#9472; NotificacionDashboardModule.cs    <span style="color:#a6e3a1;">// Nancy: HTML + API endpoints</span>
+</div>
+
+<h2 id="s5b">5.2 Interfaces y Contratos</h2>
+
+<h3>INotificacionService (SRP + ISP)</h3>
+<pre><code><span class="kw">public interface</span> <span class="tp">INotificacionService</span>
+{
+    <span class="cm">/// Crea y persiste una notificacion pendiente. Retorna notificacion_id (UUID).</span>
+    <span class="tp">string</span> <span class="fn">Crear</span>(<span class="tp">CrearNotificacionRequest</span> request);
+
+    <span class="cm">/// Actualiza estado al recibir respuesta del POS.</span>
+    <span class="kw">void</span> <span class="fn">ActualizarEstado</span>(<span class="tp">string</span> notificacionId, <span class="tp">EstadoNotificacion</span> estado,
+                          <span class="tp">string</span> mensajeRespuesta, <span class="tp">string</span> ventaId = <span class="kw">null</span>);
+
+    <span class="cm">/// Incrementa contador de reintentos en BD.</span>
+    <span class="kw">void</span> <span class="fn">IncrementarReintento</span>(<span class="tp">string</span> notificacionId);
+
+    <span class="cm">/// Notificaciones pendientes que superaron el umbral de tiempo.</span>
+    <span class="tp">IList&lt;NotificacionDto&gt;</span> <span class="fn">ObtenerPendientesExpiradas</span>(<span class="tp">int</span> umbralSegundos);
+
+    <span class="cm">/// Paginado con filtros para dashboard.</span>
+    <span class="tp">IList&lt;NotificacionDto&gt;</span> <span class="fn">ObtenerTodas</span>(<span class="tp">string</span> estado, <span class="tp">string</span> tipo,
+                                        <span class="tp">int</span> pagina, <span class="tp">int</span> registros, <span class="kw">out int</span> total);
+
+    <span class="cm">/// Estadisticas agregadas.</span>
+    <span class="tp">NotificacionStatsDto</span> <span class="fn">ObtenerEstadisticas</span>();
+}</code></pre>
+
+<h3>IRetryPolicy (ISP)</h3>
+<pre><code><span class="kw">public interface</span> <span class="tp">IRetryPolicy</span>
+{
+    <span class="tp">int</span> MaxReintentos { <span class="kw">get</span>; }
+    <span class="tp">int</span> <span class="fn">GetDelaySegundos</span>(<span class="tp">int</span> intentoActual);   <span class="cm">// Backoff exponencial</span>
+    <span class="tp">bool</span> <span class="fn">DebeReintentar</span>(<span class="tp">int</span> reintentoActual, <span class="tp">string</span> estadoActual);
+}</code></pre>
+
+<h2 id="s5c">5.3 Diagrama de Capas</h2>
+<div class="flow-diagram">
+&#9484;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;
+&#9474;                      CAPA SERVIDOR (Nancy)                    &#9474;
+&#9474;  NotificacionDashboardModule   NotificacionServer (REST API) &#9474;
+&#9492;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;
+                &#9474;                  &#9474;
+                &#9660;                  &#9660;
+&#9484;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;
+&#9474;                   CAPA CONTROLLER                             &#9474;
+&#9474;        NotificacionController (coordina todo)                 &#9474;
+&#9492;&#9472;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;
+      &#9474;                &#9474;                &#9474;
+      &#9660;                &#9660;                &#9660;
+&#9484;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;  &#9484;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;  &#9484;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;
+&#9474;Notificacion &#9474;  &#9474;Notificacion  &#9474;  &#9474;Notificacion   &#9474;
+&#9474;Service      &#9474;  &#9474;RetryService &#9474;  &#9474;QueryService  &#9474;
+&#9474;(CRUD+query) &#9474;  &#9474;(background) &#9474;  &#9474;(consulta POS)&#9474;
+&#9492;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;  &#9492;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;  &#9492;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;
+      &#9474;                &#9474;                &#9474;
+      &#9492;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;
+                       &#9474;
+                       &#9660;
+         &#9484;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;
+         &#9474;    CAPA ENTITY (ORM)       &#9474;
+         &#9474;  Notificacion : SugarRecord &#9474;
+         &#9474;  NotificacionBase           &#9474;
+         &#9492;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;
+                       &#9474;
+                       &#9660;
+                &#9484;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;
+                &#9474; SQLite BD   &#9474;
+                &#9492;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;
+</div>
+
+<!-- ==================== 6. FASES ==================== -->
+<div class="page-break"></div>
+<h1 id="s6"><span class="section-num">6.</span> Plan de Implementacion por Fases</h1>
+
+<h2 id="f0"><span class="section-num">Fase 0</span> &mdash; Contratos y Modelos (sin tocar flujo existente)</h2>
+<p><strong>Objetivo:</strong> Crear la base del sistema sin romper el flujo POS actual.</p>
+
+<h4>Paso 0.1 &mdash; Enums de dominio</h4>
+<pre><code><span class="cm">// QuipuNetX/Notificaciones/Domain/EstadoNotificacion.cs</span>
+<span class="kw">namespace</span> QuipuNetX.Notificaciones.Domain
+{
+    <span class="kw">public enum</span> <span class="tp">EstadoNotificacion</span>
+    {
+        Pendiente  = 1,   <span class="cm">// Enviada, esperando respuesta del POS</span>
+        Completada = 2,   <span class="cm">// POS respondio exitosamente</span>
+        Error      = 3,   <span class="cm">// POS respondio con error</span>
+        Timeout    = 4    <span class="cm">// Maximo de reintentos alcanzado</span>
+    }
+}
+
+<span class="cm">// QuipuNetX/Notificaciones/Domain/TipoNotificacion.cs</span>
+<span class="kw">public static class</span> <span class="tp">TipoNotificacion</span>
+{
+    <span class="kw">public const string</span> OrdenPedido = <span class="str">"ordenpedido"</span>;
+    <span class="kw">public const string</span> Delivery    = <span class="str">"delivery"</span>;
+    <span class="kw">public const string</span> Venta       = <span class="str">"venta"</span>;
+    <span class="cm">// Extensible: OCP - agregar sin modificar codigo existente</span>
+}</code></pre>
+
+<h4>Paso 0.2 &mdash; DTOs</h4>
+<pre><code><span class="kw">public class</span> <span class="tp">CrearNotificacionRequest</span>
+{
+    <span class="kw">public string</span> TipoNotificacion { <span class="kw">get; set</span>; }
+    <span class="kw">public string</span> IdentificadorAsociado { <span class="kw">get; set</span>; }  <span class="cm">// UUID transaccion</span>
+    <span class="kw">public string</span> IpOrigen { <span class="kw">get; set</span>; }
+    <span class="kw">public string</span> IpDestino { <span class="kw">get; set</span>; }
+    <span class="kw">public string</span> NombreDispositivo { <span class="kw">get; set</span>; }
+    <span class="kw">public string</span> TipoPago { <span class="kw">get; set</span>; }
+    <span class="kw">public string</span> PayloadEnvio { <span class="kw">get; set</span>; }        <span class="cm">// JSON completo</span>
+}</code></pre>
+
+<h2 id="f1"><span class="section-num">Fase 1</span> &mdash; Entidades y BD</h2>
+<p><strong>Objetivo:</strong> Crear <span class="inline-code">NotificacionBase</span> y <span class="inline-code">Notificacion</span> siguiendo el patron SugarRecord. Extender <span class="inline-code">TransaccionordenpedidoBase</span> con los 3 campos nuevos.</p>
+
+<h4>Paso 1.1 &mdash; NotificacionBase.cs</h4>
+<p>Patron identico a <span class="inline-code">TransaccionordenpedidoBase</span>: campos <span class="inline-code">protected internal</span>, propiedades con <span class="inline-code">[Column]</span>, metodos <span class="inline-code">fromJSON</span> / <span class="inline-code">toJSON</span> / <span class="inline-code">save</span> / <span class="inline-code">delete</span>.</p>
+
+<h4>Paso 1.2 &mdash; Extender TransaccionordenpedidoBase</h4>
+<pre><code><span class="cm">// Nuevos campos en TransaccionordenpedidoBase.cs:</span>
+<span class="kw">protected internal string</span> transaccionordenpedido_id;  <span class="cm">// UUID unico</span>
+<span class="kw">protected internal string</span> notificacion_id;            <span class="cm">// FK a notificacion</span>
+<span class="kw">protected internal string</span> ip_origen;                  <span class="cm">// IP dispositivo cliente</span>
+
+[<span class="fn">Column</span>(<span class="str">"TRANSACCIONORDENPEDIDOID"</span>)]
+<span class="kw">public virtual string</span> Transaccionordenpedido_id { ... }
+
+[<span class="fn">Column</span>(<span class="str">"NOTIFICACIONID"</span>)]
+<span class="kw">public virtual string</span> Notificacion_id { ... }
+
+[<span class="fn">Column</span>(<span class="str">"IPORIGEN"</span>)]
+<span class="kw">public virtual string</span> Ip_origen { ... }</code></pre>
+
+<h2 id="f2"><span class="section-num">Fase 2</span> &mdash; Servicio de Notificaciones</h2>
+
+<h4>Paso 2.1 &mdash; NotificacionService.cs</h4>
+<ul>
+<li><span class="inline-code">Crear()</span>: genera UUID v4, persiste con <span class="inline-code">notificacion.save()</span>, retorna UUID</li>
+<li><span class="inline-code">ActualizarEstado()</span>: UPDATE directo via <span class="inline-code">executeQuery</span></li>
+<li><span class="inline-code">IncrementarReintento()</span>: <span class="inline-code">UPDATE cantidad_reintentos = cantidad_reintentos + 1</span></li>
+<li><span class="inline-code">ObtenerPendientesExpiradas()</span>: <span class="inline-code">SELECT WHERE estado=1 AND julianday('now') - julianday(FECHACREACION) > N</span></li>
+<li><span class="inline-code">ObtenerTodas()</span>: SELECT con filtros + LIMIT/OFFSET para paginacion</li>
+<li><span class="inline-code">ObtenerEstadisticas()</span>: COUNT agrupados por estado y tipo</li>
+</ul>
+
+<h4>Paso 2.2 &mdash; ExponentialRetryPolicy.cs</h4>
+<table>
+<tr><th>Intento</th><th>Delay</th><th>Tiempo acumulado</th></tr>
+<tr><td>1</td><td>30 segundos</td><td>30s</td></tr>
+<tr><td>2</td><td>60 segundos</td><td>1m 30s</td></tr>
+<tr><td>3</td><td>120 segundos</td><td>3m 30s</td></tr>
+<tr><td>4+</td><td>&mdash;</td><td>Marca como TIMEOUT</td></tr>
+</table>
+
+<h4>Paso 2.3 &mdash; NotificacionRetryService.cs</h4>
+<div class="flow-diagram">
+Timer cada 30s (configurable):
+  1. ObtenerPendientesExpiradas(30)
+  2. Por cada notificacion:
+     a. DebeReintentar(reintentos)?
+        - NO  --> ActualizarEstado(TIMEOUT)
+        - SI  --> IncrementarReintento()
+                  ConsultarEstadoEnPosAsync(posIp, ordenpedidoId)
+                    - POS tiene transaccion completada --> ActualizarEstado(COMPLETADA)
+                    - POS tiene transaccion pendiente  --> Esperar siguiente ciclo
+                    - POS no responde                  --> Esperar siguiente ciclo
+</div>
+
+<h4>Paso 2.4 &mdash; NotificacionQueryService.cs</h4>
+<p>Consulta al dispositivo POS el estado de una transaccion especifica via REST GET.</p>
+
+<h2 id="f3"><span class="section-num">Fase 3</span> &mdash; Controller y Server</h2>
+
+<h4>NotificacionController.cs (coordinador)</h4>
+<ul>
+<li><span class="inline-code">Crear(request)</span> &rarr; string notificacionId</li>
+<li><span class="inline-code">RecibirRespuestaDestinoAsync(dto)</span> &rarr; Respuesta (busca trx, actualiza estado)</li>
+<li><span class="inline-code">ConsultarEstado(notificacionId)</span> &rarr; NotificacionDto</li>
+<li><span class="inline-code">ReintentarManual(notificacionId)</span> &rarr; Respuesta</li>
+<li><span class="inline-code">ObtenerTodas(filtros)</span> &rarr; paginado</li>
+<li><span class="inline-code">ObtenerEstadisticas()</span> &rarr; stats</li>
+</ul>
+
+<h4>NotificacionServer.cs (parse JSON &rarr; controller)</h4>
+<p>Patron identico a <span class="inline-code">OrdenpedidoServer</span>, <span class="inline-code">PagoServer</span>.</p>
+
+<h4>Endpoints REST</h4>
+<table>
+<tr><th>Metodo</th><th>Ruta</th><th>Descripcion</th></tr>
+<tr><td>POST</td><td><span class="inline-code">/api/rest/notificaciones/v1/recibirRespuesta</span></td><td>POS notifica resultado a QuipuNet</td></tr>
+<tr><td>GET</td><td><span class="inline-code">/api/rest/notificaciones/v1/consultarEstado</span></td><td>?notificacion_id=UUID</td></tr>
+<tr><td>POST</td><td><span class="inline-code">/api/rest/notificaciones/v1/reintentarManual</span></td><td>Reintento manual desde dashboard</td></tr>
+<tr><td>GET</td><td><span class="inline-code">/api/rest/notificaciones/v1/listar</span></td><td>Paginado con filtros</td></tr>
+<tr><td>GET</td><td><span class="inline-code">/api/rest/notificaciones/v1/estadisticas</span></td><td>Contadores para dashboard</td></tr>
+</table>
+
+<div class="page-break"></div>
+<h2 id="f4"><span class="section-num">Fase 4</span> &mdash; Integracion con OrdenpedidoController</h2>
+<p><strong>Objetivo:</strong> Refactorizar el flujo existente para crear y mantener notificaciones sin romper compatibilidad.</p>
+
+<h4>4.1 Modificar agregarAsync (background task)</h4>
+<pre><code><span class="cm">// ANTES de LlamarPosApiAsync:</span>
+<span class="kw">string</span> trxUuid = <span class="tp">Guid</span>.NewGuid().ToString(<span class="str">"D"</span>);
+
+<span class="kw">string</span> notifId = <span class="tp">NotificacionController</span>.<span class="fn">Crear</span>(<span class="kw">new</span> <span class="tp">CrearNotificacionRequest</span>
+{
+    TipoNotificacion      = <span class="tp">TipoNotificacion</span>.OrdenPedido,
+    IdentificadorAsociado = trxUuid,
+    IpOrigen              = ordenpedido.Ordenpedido_iporigen ?? <span class="tp">Util</span>.DeviceIpAddress,
+    IpDestino             = posIp,
+    NombreDispositivo     = <span class="fn">ObtenerNombreDispositivo</span>(ordenpedido.Ordenpedido_iporigen),
+    TipoPago              = ordenpedido.PagoPos.ClaveJson,
+    PayloadEnvio          = <span class="fn">BuildPayloadParaNotificacion</span>(ordenpedido, rMontos)
+});
+
+trx = <span class="kw">new</span> <span class="tp">Transaccionordenpedido</span>
+{
+    Transaccionordenpedido_id = trxUuid,    <span class="cm">// UUID unico</span>
+    Notificacion_id           = notifId,    <span class="cm">// FK a notificacion</span>
+    Ip_origen                 = ordenpedido.Ordenpedido_iporigen,
+    Ordenpedido_id            = id.ToString(),
+    Pos_id                    = posIp,
+    Transaccion_estado        = <span class="str">"2"</span>,
+    Fecha_inicio              = fechaInicio,
+};
+trx.<span class="fn">save</span>();
+
+<span class="cm">// Si POS falla:</span>
+<span class="tp">NotificacionController</span>.<span class="fn">ActualizarEstado</span>(notifId, <span class="tp">EstadoNotificacion</span>.Error, rPos.Message);
+
+<span class="cm">// Si POS OK y venta OK:</span>
+<span class="tp">NotificacionController</span>.<span class="fn">ActualizarEstado</span>(notifId, <span class="tp">EstadoNotificacion</span>.Completada, <span class="str">"OK"</span>, ventaId);</code></pre>
+
+<h4>4.2 Modificar cobrarIzipayResponse / cobrarCredibancoResponse</h4>
+<pre><code><span class="cm">// Al completar exitosamente o fallar:</span>
+<span class="kw">if</span> (transaccionActual.Notificacion_id != <span class="kw">null</span>)
+{
+    <span class="tp">NotificacionController</span>.<span class="fn">ActualizarEstado</span>(
+        transaccionActual.Notificacion_id,
+        estado,   <span class="cm">// Completada o Error</span>
+        mensaje,
+        ventaId   <span class="cm">// null si error</span>
+    );
+}</code></pre>
+
+<h4>4.3 Refactorizar NotificarOrigenAsync</h4>
+<pre><code><span class="kw">private static async</span> <span class="tp">Task</span> <span class="fn">NotificarOrigenAsync</span>(<span class="tp">string</span> iporigen, <span class="tp">JObject</span> payload,
+                                                  <span class="tp">string</span> notificacionId = <span class="kw">null</span>)
+{
+    <span class="cm">// Agregar notificacion_id al payload para correlacion</span>
+    <span class="kw">if</span> (!<span class="tp">string</span>.IsNullOrEmpty(notificacionId))
+        payload[<span class="str">"notificacion_id"</span>] = notificacionId;
+
+    <span class="kw">var</span> client  = <span class="kw">new</span> <span class="tp">RestClient</span>(<span class="str">"http://"</span> + iporigen + <span class="str">":8081"</span>);
+    <span class="kw">var</span> request = <span class="kw">new</span> <span class="tp">RestRequest</span>(<span class="str">"/api/rest/ordenpedido/response"</span>, Method.POST);
+    request.<span class="fn">AddParameter</span>(<span class="str">"application/json"</span>, payload.ToString(), ParameterType.RequestBody);
+
+    <span class="kw">var</span> response = <span class="kw">await</span> client.<span class="fn">ExecuteTaskAsync</span>(request);
+    <span class="cm">// Si falla, el RetryService lo detectara automaticamente</span>
+}</code></pre>
+
+<h2 id="f5"><span class="section-num">Fase 5</span> &mdash; Contratos REST para Java (QuipuPos)</h2>
+
+<h4>Endpoint que QuipuPos debe implementar (consulta de estado)</h4>
+<pre><code><span class="fn">GET</span> http://{posIp}:8081/api/rest/ordenpedido/consultarTransaccion?id={ordenpedidoId}
+
+<span class="cm">Response:</span>
+{
+  <span class="str">"tipo"</span>: <span class="str">"SI"</span> | <span class="str">"ERROR"</span>,
+  <span class="str">"data"</span>: {
+    <span class="str">"estado"</span>: <span class="str">"completada"</span> | <span class="str">"pendiente"</span> | <span class="str">"error"</span>,
+    <span class="str">"mensaje"</span>: <span class="str">"..."</span>,
+    <span class="str">"transaccion_id"</span>: <span class="str">"..."</span>
+  }
+}</code></pre>
+
+<h4>Endpoint que QuipuNet expone (POS notifica resultado)</h4>
+<pre><code><span class="fn">POST</span> http://{quipuNetIp}:8081/api/rest/notificaciones/v1/recibirRespuesta
+
+<span class="cm">Body:</span>
+{
+  <span class="str">"notificacion_id"</span>:  <span class="str">"uuid-de-la-notificacion"</span>,
+  <span class="str">"ordenpedido_id"</span>:   <span class="str">"..."</span>,
+  <span class="str">"tipo_integracion"</span>: <span class="str">"1"</span> | <span class="str">"2"</span> | <span class="str">"3"</span>,
+  <span class="str">"response"</span>:         { <span class="cm">/* JSON completo del POS */</span> },
+  <span class="str">"ip_origen"</span>:        <span class="str">"192.168.1.x"</span>
+}</code></pre>
+
+<div class="highlight-box">
+<strong>Compatibilidad Java:</strong> Estos contratos son REST/JSON estandar. QuipuPos implementa un simple <span class="inline-code">HttpURLConnection</span> o <span class="inline-code">OkHttp</span> POST/GET sobre estos endpoints. Sin acoplamiento a librerias C#.
+</div>
+
+<div class="page-break"></div>
+<h2 id="f6"><span class="section-num">Fase 6</span> &mdash; Dashboard de Trazabilidad</h2>
+
+<table>
+<tr><th>Aspecto</th><th>Especificacion</th></tr>
+<tr><td>Puerto</td><td><strong>8083</strong> (separado del 8081 operativo)</td></tr>
+<tr><td>URL</td><td><span class="inline-code">http://{servidor}:8083/notif/</span></td></tr>
+<tr><td>Tecnologia</td><td>Nancy module + HTML inline + TailwindCSS CDN + Chart.js CDN</td></tr>
+<tr><td>Auth</td><td>Token de sesion QuipuNetX (header Authorization: Bearer)</td></tr>
+<tr><td>Tiempo real</td><td>JS polling cada 5s (compatible .NET 4.5.2)</td></tr>
+<tr><td>Export PDF</td><td>jsPDF CDN (client-side, zero deps backend)</td></tr>
+<tr><td>Export CSV</td><td>Endpoint nativo <span class="inline-code">/notif/api/export/csv</span></td></tr>
+</table>
+
+<h4>Wireframe del Dashboard</h4>
+<div class="flow-diagram" style="font-size:0.8em;">
++================================================================+
+|  QuipuNet - Trazabilidad POS                      [Usuario X]  |
++================================================================+
+|                                                                 |
+|  [&#9632; Pendientes: 3]  [&#9632; Completadas: 142]  [&#9632; Errores: 7]  [&#9632; Timeout: 1]  |
+|                                                                 |
++-------------------------------+---------------------------------+
+|  Grafica dona                 |  Grafica barras por hora        |
+|  (por estado)                 |  (volumen de transacciones)     |
+|  Chart.js Doughnut            |  Chart.js Bar                   |
++-------------------------------+---------------------------------+
+|                                                                 |
+|  Conectividad Dispositivos:                                     |
+|  [* POS1 192.168.1.10 - OK 12ms] [* POS2 - X Sin respuesta]   |
+|  [* Client1 192.168.1.20 - OK 5ms] [* Client2 - OK 8ms]       |
+|                                                                 |
++-----------------------------------------------------------------+
+|  Filtros: [Estado v] [Tipo v] [IP Origen] [Desde] [Hasta]      |
+|           [Buscar]  [Exportar CSV]  [Exportar PDF]              |
++-----------------------------------------------------------------+
+|  ID   | Tipo    | Estado  | IP Orig  | IP Dest  | Fecha  | Rty |
+|  ---  | ------- | ------- | -------- | -------- | ------ | --- |
+|  a1b2 | ordenp  | Pend.   | .1.20    | .1.10    | 14:05  |  1  |
+|  c3d4 | ordenp  | Complet | .1.21    | .1.10    | 14:02  |  0  |
+|                                                   [Ver] [Retry] |
++-----------------------------------------------------------------+
+</div>
+
+<h4>API Endpoints del Dashboard</h4>
+<table>
+<tr><th>Metodo</th><th>Ruta</th><th>Descripcion</th></tr>
+<tr><td>GET</td><td><span class="inline-code">/notif/</span></td><td>HTML dashboard completo</td></tr>
+<tr><td>GET</td><td><span class="inline-code">/notif/api/list</span></td><td>JSON paginado con filtros</td></tr>
+<tr><td>GET</td><td><span class="inline-code">/notif/api/stats</span></td><td>Contadores + datos graficas</td></tr>
+<tr><td>GET</td><td><span class="inline-code">/notif/api/devices</span></td><td>Ping a todos los DeviceClient + POS</td></tr>
+<tr><td>GET</td><td><span class="inline-code">/notif/api/detail/{id}</span></td><td>Detalle completo con payload</td></tr>
+<tr><td>POST</td><td><span class="inline-code">/notif/api/retry</span></td><td>Reintento manual</td></tr>
+<tr><td>GET</td><td><span class="inline-code">/notif/api/export/csv</span></td><td>Export CSV</td></tr>
+</table>
+
+<h2 id="f7"><span class="section-num">Fase 7</span> &mdash; Registro e Inicializacion</h2>
+<ul>
+<li><strong>SyncService.start()</strong>: <span class="inline-code">NotificacionRetryService.Instance.Start();</span></li>
+<li><strong>SyncService.stopAllSync()</strong>: <span class="inline-code">NotificacionRetryService.Instance.Stop();</span></li>
+<li><strong>WebServerNewBootstrapper</strong>: <span class="inline-code">container.Register&lt;NotificacionDashboardModule&gt;();</span></li>
+<li><strong>RestaurantpeApplication</strong>: <span class="inline-code">Notificacion.EnsureTable();</span> al iniciar</li>
+<li><strong>FeatureFlagConfigReader</strong>: nuevo flag <span class="inline-code">HABILITAR_RETRY_NOTIFICACIONES</span> (default: true)</li>
+</ul>
+
+<h2 id="f8"><span class="section-num">Fase 8</span> &mdash; Tests</h2>
+<table>
+<tr><th>Test Class</th><th>Tests</th><th>Cobertura</th></tr>
+<tr>
+<td><span class="inline-code">NotificacionServiceTests</span></td>
+<td>
+- CrearNotificacion_GuardaConUUIDUnico<br>
+- ActualizarEstado_CambiaEstadoYFecha<br>
+- ObtenerPendientesExpiradas_RetornaSoloVencidas<br>
+- IncrementarReintento_AumentaContador
+</td>
+<td>NotificacionService</td>
+</tr>
+<tr>
+<td><span class="inline-code">ExponentialRetryPolicyTests</span></td>
+<td>
+- DebeReintentar_FalseCuandoMaxAlcanzado<br>
+- GetDelaySegundos_BackoffCorrecto
+</td>
+<td>ExponentialRetryPolicy</td>
+</tr>
+<tr>
+<td><span class="inline-code">NotificacionControllerTests</span></td>
+<td>
+- RecibirRespuesta_ActualizaNotificacionYTransaccion<br>
+- ReintentarManual_IncrementaContador
+</td>
+<td>NotificacionController</td>
+</tr>
+</table>
+
+<!-- ==================== 7. REINTENTOS ==================== -->
+<div class="page-break"></div>
+<h1 id="s7"><span class="section-num">7.</span> Mecanismo de Reintentos &mdash; Detalle</h1>
+
+<div class="flow-diagram">
+                    OrdenpedidoController.agregarAsync
+                               |
+                    NotificacionService.Crear()
+                               |
+                    LlamarPosApiAsync(posIp, ...)
+                          /          \
+                    OK (200)        FALLO / TIMEOUT
+                       |                  |
+                 Genera venta        Marca notificacion
+                 Marca COMPLETADA    como ERROR
+                       |                  |
+                 NotificarOrigenAsync      |
+                       |                  |
+                  (fin flujo)    NotificacionRetryService
+                                 (timer background 30s)
+                                         |
+                                 ObtenerPendientesExpiradas()
+                                         |
+                              +----------+----------+
+                              |                     |
+                       reintentos &lt; 3         reintentos >= 3
+                              |                     |
+                   IncrementarReintento()    ActualizarEstado(TIMEOUT)
+                              |                     |
+                   ConsultarEstadoEnPosAsync    (Dashboard muestra
+                              |                  alerta TIMEOUT)
+                     /        |        \
+               Completada  Pendiente  Sin respuesta
+                   |          |           |
+              Actualiza    Espera      Espera
+              COMPLETADA   siguiente   siguiente
+                           ciclo       ciclo
+</div>
+
+<div class="warn-box">
+<strong>Thread-safety:</strong> <span class="inline-code">NotificacionRetryService</span> usa <span class="inline-code">lock(object)</span> en el timer callback para evitar re-entrada si un ciclo tarda mas de 30 segundos. Todas las operaciones de BD son atomicas via <span class="inline-code">executeQuery</span>.
+</div>
+
+<!-- ==================== 8. DECISIONES ==================== -->
+<div class="page-break"></div>
+<h1 id="s8"><span class="section-num">8.</span> Tabla de Decisiones Finales</h1>
+
+<table>
+<tr><th>Pregunta</th><th>Decision</th><th>Justificacion</th></tr>
+<tr>
+<td>&iquest;BD existente o nueva?</td>
+<td><span class="badge badge-ok">Existente</span></td>
+<td>Misma SQLite, SugarRecord ORM, JOINs directos, zero new infra</td>
+</tr>
+<tr>
+<td>&iquest;Se elimina transaccionordenpedido?</td>
+<td><span class="badge badge-info">No, se enriquece</span></td>
+<td>UUID + notificacion_id. Roles complementarios (negocio vs transporte)</td>
+</tr>
+<tr>
+<td>&iquest;Multiples POS concurrentes?</td>
+<td><span class="badge badge-ok">UUID en notificacion</span></td>
+<td>Correlacion exacta por UUID, no por IP (elimina ambiguedad)</td>
+</tr>
+<tr>
+<td>&iquest;Compatibilidad Java?</td>
+<td><span class="badge badge-ok">REST/JSON estandar</span></td>
+<td>Contratos versionados (/v1/). Sin acoplamiento a C#</td>
+</tr>
+<tr>
+<td>&iquest;Dashboard auth?</td>
+<td><span class="badge badge-ok">Token sesion existente</span></td>
+<td>Reutiliza SessionManager de QuipuNetX</td>
+</tr>
+<tr>
+<td>&iquest;Dashboard puerto?</td>
+<td><span class="badge badge-info">8083 (separado)</span></td>
+<td>Evita interferencia con el 8081 operativo</td>
+</tr>
+<tr>
+<td>&iquest;Tiempo real?</td>
+<td><span class="badge badge-ok">JS polling 5s</span></td>
+<td>Compatible .NET 4.5.2, sin WebSocket extra</td>
+</tr>
+<tr>
+<td>&iquest;Export PDF?</td>
+<td><span class="badge badge-ok">jsPDF CDN client-side</span></td>
+<td>Zero dependencias backend</td>
+</tr>
+<tr>
+<td>&iquest;Reintentos?</td>
+<td><span class="badge badge-ok">Backoff exponencial</span></td>
+<td>30s, 60s, 120s. Max 3 reintentos. Configurable via FeatureFlag</td>
+</tr>
+<tr>
+<td>&iquest;SOLID?</td>
+<td><span class="badge badge-ok">SRP + ISP + OCP + DIP</span></td>
+<td>3 services, 2 interfaces, tipos extensibles, inyeccion</td>
+</tr>
+</table>
+
+<!-- ==================== 9. ARCHIVOS ==================== -->
+<h1 id="s9"><span class="section-num">9.</span> Archivos a Crear / Modificar</h1>
+
+<h3>Archivos nuevos (~18 archivos)</h3>
+<table>
+<tr><th>Ruta</th><th>Tipo</th></tr>
+<tr><td><span class="inline-code">Notificaciones/Domain/EstadoNotificacion.cs</span></td><td>Enum</td></tr>
+<tr><td><span class="inline-code">Notificaciones/Domain/TipoNotificacion.cs</span></td><td>Constants</td></tr>
+<tr><td><span class="inline-code">Notificaciones/Interfaces/INotificacionService.cs</span></td><td>Interface</td></tr>
+<tr><td><span class="inline-code">Notificaciones/Interfaces/IRetryPolicy.cs</span></td><td>Interface</td></tr>
+<tr><td><span class="inline-code">Notificaciones/Dto/CrearNotificacionRequest.cs</span></td><td>DTO</td></tr>
+<tr><td><span class="inline-code">Notificaciones/Dto/RecibirRespuestaDto.cs</span></td><td>DTO</td></tr>
+<tr><td><span class="inline-code">Notificaciones/Dto/NotificacionDto.cs</span></td><td>DTO</td></tr>
+<tr><td><span class="inline-code">Notificaciones/Dto/NotificacionStatsDto.cs</span></td><td>DTO</td></tr>
+<tr><td><span class="inline-code">Notificaciones/Services/NotificacionService.cs</span></td><td>Service</td></tr>
+<tr><td><span class="inline-code">Notificaciones/Services/ExponentialRetryPolicy.cs</span></td><td>Policy</td></tr>
+<tr><td><span class="inline-code">Notificaciones/Services/NotificacionRetryService.cs</span></td><td>Background</td></tr>
+<tr><td><span class="inline-code">Notificaciones/Services/NotificacionQueryService.cs</span></td><td>Service</td></tr>
+<tr><td><span class="inline-code">Notificaciones/controller/NotificacionController.cs</span></td><td>Controller</td></tr>
+<tr><td><span class="inline-code">Notificaciones/server/NotificacionServer.cs</span></td><td>Server</td></tr>
+<tr><td><span class="inline-code">entitybase/NotificacionBase.cs</span></td><td>EntityBase</td></tr>
+<tr><td><span class="inline-code">entity/Notificacion.cs</span></td><td>Entity</td></tr>
+<tr><td><span class="inline-code">ws/modules/NotificacionDashboardModule.cs</span></td><td>Nancy Module</td></tr>
+</table>
+
+<h3>Archivos modificados (~6 archivos)</h3>
+<table>
+<tr><th>Archivo</th><th>Cambio</th></tr>
+<tr><td><span class="inline-code">entitybase/TransaccionordenpedidoBase.cs</span></td><td>+3 campos (uuid, notificacion_id, ip_origen)</td></tr>
+<tr><td><span class="inline-code">controller/OrdenpedidoController.cs</span></td><td>Integrar crear/actualizar notificacion</td></tr>
+<tr><td><span class="inline-code">ws/WebServer_New.cs</span></td><td>Nuevas rutas + puerto 8083</td></tr>
+<tr><td><span class="inline-code">ws/WebServerNewBootstrapper.cs</span></td><td>Register NotificacionDashboardModule</td></tr>
+<tr><td><span class="inline-code">services/SyncService.cs</span></td><td>Start/Stop NotificacionRetryService</td></tr>
+<tr><td><span class="inline-code">SQLite/FeatureFlagConfigReader.cs</span></td><td>HABILITAR_RETRY_NOTIFICACIONES flag</td></tr>
+</table>
+
+<footer>
+<p>Documento generado para QuipuNet / QuipuNetX &mdash; Sistema de Notificaciones Bidireccional POS</p>
+<p>Version 1.0 &mdash; Abril 2026 &mdash; Uso interno</p>
+</footer>
+
+</body>
+</html>

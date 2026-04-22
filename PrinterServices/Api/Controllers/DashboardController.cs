@@ -520,6 +520,8 @@ namespace PrinterServices.Api.Controllers
                     estadoAnterior = l.EstadoAnterior,
                     estadoNuevo = l.EstadoNuevo,
                     detalle = l.Detalle,
+                    printerResponse = l.PrinterResponse,
+                    printerResponseLegend = l.PrinterResponseLegend,
                     fecha = l.Fecha
                 }).ToList();
 

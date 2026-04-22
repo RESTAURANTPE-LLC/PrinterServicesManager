@@ -59,6 +59,21 @@ namespace PrinterServices.Data.Models
         public string Detalle { get; set; }
 
         /// <summary>
+        /// Respuesta cruda DLE EOT al momento del check, formato "P:XX O:XX E:XX S:XX"
+        /// (4 bytes hex: Printer, Offline, Error, Sensor) o un marker como
+        /// "TCP_OK_NO_DLE" / "OFFLINE:..." cuando el TCP no llegó a ESC/POS.
+        /// </summary>
+        [Column("printer_response")]
+        public string PrinterResponse { get; set; }
+
+        /// <summary>
+        /// Decodificación human-readable de PrinterResponse (ej: "Lista para imprimir",
+        /// "Sin papel + tapa abierta"). Pre-calculada al insertar para no parsear en cada lectura.
+        /// </summary>
+        [Column("printer_response_legend")]
+        public string PrinterResponseLegend { get; set; }
+
+        /// <summary>
         /// Timestamp exacto del evento (ISO 8601).
         /// </summary>
         [Column("fecha")]

@@ -154,6 +154,7 @@
     <Compile Include="Core\Network\SnmpHelper.cs" />
     <Compile Include="Core\Network\NetworkConfig.cs" />
     <Compile Include="Core\Network\LatencyTiming.cs" />
+    <Compile Include="Core\Network\PrinterPortLock.cs" />
     <Compile Include="Core\Network\PrinterIpChanger.cs" />
     <Compile Include="Api\Controllers\NetworkController.cs" />
     <Compile Include="Services\Network\INetworkConfigCapture.cs" />
