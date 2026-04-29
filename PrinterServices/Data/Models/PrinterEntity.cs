@@ -71,6 +71,48 @@ namespace PrinterServices.Data.Models
         [Column("usb_friendly_name")]
         public string UsbFriendlyName { get; set; }  // Nombre legible (ej: "EPSON TM-T20II Receipt")
 
+        // ─── Capabilities ESC/POS detectadas por PrinterCapabilityProbe ────────────────
+        // RAZÓN: distinguir impresoras Epson genuinas (soportan GS(H fn48 para confirmar
+        // procesamiento real de cada job) de clones que solo aceptan bytes. Sin este
+        // perfil, PrintWorker no sabe qué método de confirmación usar y queda expuesto
+        // a falsos positivos (DONE que no imprimió).
+
+        [Column("capabilities_profile")]
+        public string CapabilitiesProfile { get; set; }       // "unknown" | "epson_genuine" | "clone_compatible" | "clone_minimal" | "probe_failed"
+
+        [Column("supports_dle_eot")]
+        public int SupportsDleEot { get; set; }                // 1 si al menos un DLE EOT respondió
+
+        [Column("supports_dle_eot_bits")]
+        public string SupportsDleEotBits { get; set; }         // "P,O,E,S" (cuáles de los 4 andan)
+
+        [Column("supports_asb")]
+        public int SupportsAsb { get; set; }                   // 1 si GS a devolvió 4 bytes
+
+        [Column("supports_process_id_response")]
+        public int SupportsProcessIdResponse { get; set; }     // 1 si GS(H fn48 echoed el tag → confirmación real posible
+
+        [Column("firmware_raw")]
+        public string FirmwareRaw { get; set; }                // Hex de GS I 67 (ej: "45 50 53 4F 4E...")
+
+        [Column("firmware_parsed")]
+        public string FirmwareParsed { get; set; }             // Parseado humano (ej: "EPSON TM-T20IIIL 01.02")
+
+        [Column("capabilities_detected_at")]
+        public string CapabilitiesDetectedAt { get; set; }     // ISO 8601 con ms del último probe
+
+        [Column("capabilities_probe_count")]
+        public int CapabilitiesProbeCount { get; set; }        // Total de probes ejecutados sobre esta impresora
+
+        [Column("capabilities_probe_duration_ms")]
+        public int CapabilitiesProbeDurationMs { get; set; }   // Duración del último probe (para calibración)
+
+        [Column("capabilities_last_error")]
+        public string CapabilitiesLastError { get; set; }      // Último error del probe si hubo
+
+        [Column("capabilities_last_trigger")]
+        public string CapabilitiesLastTrigger { get; set; }    // "unknown" | "sync" | "periodic" | "manual" | "first_job_day"
+
         public PrinterEntity()
         {
             Puerto = 9100;
@@ -82,6 +124,11 @@ namespace PrinterServices.Data.Models
             SnmpEnabled = 0;
             SnmpCommunity = "public";
             TipoConexion = "RED";
+            CapabilitiesProfile = "unknown";
+            SupportsDleEot = 1;  // default optimista: asumimos que soporta DLE EOT hasta que el probe diga otra cosa
+            SupportsAsb = 0;
+            SupportsProcessIdResponse = 0;
+            CapabilitiesProbeCount = 0;
         }
     }
 }

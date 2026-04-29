@@ -460,6 +460,20 @@ namespace PrinterServices.Config
                     Key = "StatusCheckPortLockTimeoutMs", Value = "1500", DefaultValue = "1500",
                     Description = "Tiempo máximo en ms que StatusMonitor espera el port lock de una impresora antes de salt el check de este ciclo. Bajarlo si el check de estado empieza a tardar; subirlo si hay muchos checks salteados.",
                     Category = "timing", ValueType = "int", MinValue = "100", MaxValue = "30000"
+                },
+
+                // ── Diagnóstico: guardar bitmaps generados como JPG ──
+                new ConfigSettingEntity
+                {
+                    Key = "GuardarBitmapsGenerados", Value = "0", DefaultValue = "0",
+                    Description = "Si es 1, cada bitmap renderizado para impresión se guarda como JPG en %ProgramData%\\QuipuNet\\bitmaps\\YYYY-MM-DD\\<jobId>.jpg, con metadata (ancho, alto, densidad de negro, bytes ESC/POS, emulación usada). Permite revisar desde el dashboard qué se intentó imprimir cuando la impresora saca basura o tickets truncados. Desactívalo cuando termines de diagnosticar para no llenar el disco.",
+                    Category = "diagnostics", ValueType = "int", MinValue = "0", MaxValue = "1"
+                },
+                new ConfigSettingEntity
+                {
+                    Key = "BitmapsRetentionDays", Value = "7", DefaultValue = "7",
+                    Description = "Días de retención de los JPG guardados por GuardarBitmapsGenerados. Al guardar un bitmap nuevo, se borran los archivos más viejos que este umbral para acotar uso de disco.",
+                    Category = "diagnostics", ValueType = "int", MinValue = "1", MaxValue = "90"
                 }
             };
 

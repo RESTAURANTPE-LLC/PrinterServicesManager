@@ -43,6 +43,63 @@ namespace PrinterServices.Monitoring
         // DLE EOT 4 — Paper sensor status
         private static readonly byte[] DLE_EOT_PAPER = { 0x10, 0x04, 0x04 };
 
+        /// <summary>
+        /// Solo verifica si el puerto TCP esta abierto, SIN enviar DLE EOT.
+        /// Para impresoras que se bloquean con DLE EOT (ej: E3NSTART RPT008, chinas genéricas).
+        /// Si TCP conecta → ONLINE + DISPONIBLE. Si no → OFFLINE.
+        /// </summary>
+        public static PrinterStatus CheckTcpOnly(string ip, int port, int timeoutMs)
+        {
+            if (string.IsNullOrEmpty(ip))
+                return PrinterStatus.Offline("IP vacía");
+            if (port <= 0) port = 9100;
+            if (timeoutMs <= 0) timeoutMs = 1000;
+
+            System.Net.Sockets.Socket socket = null;
+            try
+            {
+                socket = new System.Net.Sockets.Socket(
+                    System.Net.Sockets.AddressFamily.InterNetwork,
+                    System.Net.Sockets.SocketType.Stream,
+                    System.Net.Sockets.ProtocolType.Tcp);
+                socket.NoDelay = true;
+
+                var connectResult = socket.BeginConnect(ip, port, null, null);
+                bool connected = connectResult.AsyncWaitHandle.WaitOne(timeoutMs, true);
+
+                if (!connected || !socket.Connected)
+                {
+                    Log.WarnFormat("[STATUS-TCP] {0}:{1} → TCP CONNECT FALLÓ (timeout {2}ms)", ip, port, timeoutMs);
+                    return PrinterStatus.Offline("TCP connect falló");
+                }
+
+                Log.DebugFormat("[STATUS-TCP] {0}:{1} → TCP CONNECT OK (sin DLE EOT — impresora no soporta)", ip, port);
+
+                // TCP conecta = impresora online y disponible (no enviamos DLE para no bloquearla)
+                return new PrinterStatus
+                {
+                    Online = true,
+                    DisponibleParaImprimir = true,
+                    TienePapel = true,
+                    TapaAbierta = false,
+                    ErrorRecuperable = false,
+                    RawStatus = "TCP_ONLY_OK"
+                };
+            }
+            catch (Exception ex)
+            {
+                Log.WarnFormat("[STATUS-TCP] {0}:{1} → EXCEPCION: {2}", ip, port, ex.Message);
+                return PrinterStatus.Offline(ex.Message);
+            }
+            finally
+            {
+                if (socket != null)
+                {
+                    try { if (socket.Connected) socket.Shutdown(System.Net.Sockets.SocketShutdown.Both); socket.Close(); } catch { }
+                }
+            }
+        }
+
         public static async Task<PrinterStatus> CheckAsync(string ip, int port, int timeoutMs, CancellationToken ct)
         {
             if (string.IsNullOrEmpty(ip))
@@ -67,9 +124,11 @@ namespace PrinterServices.Monitoring
 
                 if (!connected || !socket.Connected)
                 {
+                    Log.WarnFormat("[STATUS] {0}:{1} → TCP CONNECT FALLÓ (timeout {2}ms) — OFFLINE", ip, port, timeoutMs);
                     return PrinterStatus.Offline("No se pudo conectar a " + ip + ":" + port);
                 }
 
+                Log.DebugFormat("[STATUS] {0}:{1} → TCP CONNECT OK", ip, port);
                 // Si llegamos aquí → conexión TCP exitosa → impresora está en la red
                 var status = new PrinterStatus { Online = true, TienePapel = true };
 
@@ -237,9 +296,11 @@ namespace PrinterServices.Monitoring
 
                 if (!connected || !socket.Connected)
                 {
+                    Log.WarnFormat("[STATUS-SYNC] {0}:{1} → TCP CONNECT FALLÓ (timeout {2}ms) — OFFLINE", ip, port, timeoutMs);
                     return PrinterStatus.Offline("No se pudo conectar a " + ip + ":" + port);
                 }
 
+                Log.DebugFormat("[STATUS-SYNC] {0}:{1} → TCP CONNECT OK", ip, port);
                 // Si llegamos aquí → conexión TCP exitosa → impresora está en la red
                 var status = new PrinterStatus { Online = true, TienePapel = true };
 
@@ -324,6 +385,7 @@ namespace PrinterServices.Monitoring
             }
             catch (Exception ex)
             {
+                Log.WarnFormat("[STATUS-SYNC] {0}:{1} → EXCEPCION: {2}", ip, port, ex.Message);
                 return PrinterStatus.Offline(ex.Message);
             }
             finally

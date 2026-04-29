@@ -93,6 +93,37 @@ namespace PrinterServices.Data
             CreateTable<Models.DeviceOnNetworkEntity>();
             try { Execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_device_mac ON devices_on_network(mac_address)"); Execute("CREATE INDEX IF NOT EXISTS idx_device_online ON devices_on_network(is_online)"); } catch { }
 
+            // Diagnóstico de falsos positivos: intentos de impresión y transcript de comandos
+            // RAZÓN: cada intento guarda su propio diagnóstico independiente (no se pisa en retry);
+            // el transcript graba byte-por-byte qué se envió a la impresora y qué respondió,
+            // para poder diagnosticar DONE que no imprimió físicamente.
+            CreateTable<Models.PrintJobAttemptEntity>();
+            CreateTable<Models.PrintJobAttemptCommandEntity>();
+            // Transcript del ÚLTIMO probe de capacidades por impresora.
+            // A diferencia del transcript por intento, acá guardamos sólo el último probe
+            // (se borran las filas viejas antes de insertar) para que la BD no crezca.
+            CreateTable<Models.PrinterProbeLogEntity>();
+            // Metadata de bitmaps generados (cuando GuardarBitmapsGenerados=1).
+            // El archivo JPG vive en %ProgramData%\QuipuNet\bitmaps\; acá sólo el registro
+            // con width/height/dark_ratio/bytes para diagnóstico rápido.
+            CreateTable<Models.PrintJobBitmapEntity>();
+            try
+            {
+                Execute("CREATE INDEX IF NOT EXISTS idx_attempts_job ON print_job_attempts(job_id)");
+                Execute("CREATE INDEX IF NOT EXISTS idx_attempts_start ON print_job_attempts(started_at)");
+                Execute("CREATE INDEX IF NOT EXISTS idx_attempts_outcome ON print_job_attempts(outcome)");
+                Execute("CREATE INDEX IF NOT EXISTS idx_attempts_suspicious ON print_job_attempts(suspicious_fast_send)");
+                Execute("CREATE INDEX IF NOT EXISTS idx_cmd_attempt ON print_job_attempt_commands(attempt_id, sequence_num)");
+                Execute("CREATE INDEX IF NOT EXISTS idx_cmd_ts_utc ON print_job_attempt_commands(timestamp_utc)");
+                Execute("CREATE INDEX IF NOT EXISTS idx_probe_log_printer ON printer_capability_probe_log(impresora_id, sequence_num)");
+                Execute("CREATE INDEX IF NOT EXISTS idx_bitmap_job ON print_job_bitmaps(job_id)");
+                Execute("CREATE INDEX IF NOT EXISTS idx_bitmap_generated ON print_job_bitmaps(generated_at_utc)");
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("[DB] Error creando índices de print_job_attempts/commands/probe_log: " + ex.Message);
+            }
+
             // Migración: agregar columnas si no existen
             try
             {
@@ -177,10 +208,100 @@ namespace PrinterServices.Data
                     Execute("ALTER TABLE printers ADD COLUMN usb_friendly_name TEXT");
                     Log.Info("[DB] Columna 'usb_friendly_name' agregada a tabla printers");
                 }
+
+                // ─── Migración Capabilities: 12 columnas para el PrinterCapabilityProbe ───
+                // RAZÓN: saber por impresora si soporta GS ( H fn48 (confirmación de procesamiento
+                // real vs. solo recepción TCP). Sin esto, PrintWorker no puede elegir el método
+                // de confirmación adecuado y queda expuesto a falsos positivos.
+                bool hasCapProfile = false, hasSupDleEot = false, hasSupDleEotBits = false;
+                bool hasSupAsb = false, hasSupProcessId = false;
+                bool hasFirmwareRaw = false, hasFirmwareParsed = false;
+                bool hasCapDetectedAt = false, hasCapProbeCount = false;
+                bool hasCapProbeDuration = false, hasCapLastError = false, hasCapLastTrigger = false;
+
+                foreach (var col in columns)
+                {
+                    var colDict3 = col as System.Collections.Generic.IDictionary<string, object>;
+                    if (colDict3 == null || !colDict3.ContainsKey("name")) continue;
+                    string colName3 = colDict3["name"].ToString();
+                    if (colName3 == "capabilities_profile") hasCapProfile = true;
+                    else if (colName3 == "supports_dle_eot") hasSupDleEot = true;
+                    else if (colName3 == "supports_dle_eot_bits") hasSupDleEotBits = true;
+                    else if (colName3 == "supports_asb") hasSupAsb = true;
+                    else if (colName3 == "supports_process_id_response") hasSupProcessId = true;
+                    else if (colName3 == "firmware_raw") hasFirmwareRaw = true;
+                    else if (colName3 == "firmware_parsed") hasFirmwareParsed = true;
+                    else if (colName3 == "capabilities_detected_at") hasCapDetectedAt = true;
+                    else if (colName3 == "capabilities_probe_count") hasCapProbeCount = true;
+                    else if (colName3 == "capabilities_probe_duration_ms") hasCapProbeDuration = true;
+                    else if (colName3 == "capabilities_last_error") hasCapLastError = true;
+                    else if (colName3 == "capabilities_last_trigger") hasCapLastTrigger = true;
+                }
+
+                if (!hasCapProfile)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN capabilities_profile TEXT DEFAULT 'unknown'");
+                    Log.Info("[DB] Columna 'capabilities_profile' agregada a tabla printers");
+                }
+                if (!hasSupDleEot)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN supports_dle_eot INTEGER DEFAULT 1");
+                    Log.Info("[DB] Columna 'supports_dle_eot' agregada a tabla printers");
+                }
+                if (!hasSupDleEotBits)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN supports_dle_eot_bits TEXT");
+                    Log.Info("[DB] Columna 'supports_dle_eot_bits' agregada a tabla printers");
+                }
+                if (!hasSupAsb)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN supports_asb INTEGER DEFAULT 0");
+                    Log.Info("[DB] Columna 'supports_asb' agregada a tabla printers");
+                }
+                if (!hasSupProcessId)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN supports_process_id_response INTEGER DEFAULT 0");
+                    Log.Info("[DB] Columna 'supports_process_id_response' agregada a tabla printers");
+                }
+                if (!hasFirmwareRaw)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN firmware_raw TEXT");
+                    Log.Info("[DB] Columna 'firmware_raw' agregada a tabla printers");
+                }
+                if (!hasFirmwareParsed)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN firmware_parsed TEXT");
+                    Log.Info("[DB] Columna 'firmware_parsed' agregada a tabla printers");
+                }
+                if (!hasCapDetectedAt)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN capabilities_detected_at TEXT");
+                    Log.Info("[DB] Columna 'capabilities_detected_at' agregada a tabla printers");
+                }
+                if (!hasCapProbeCount)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN capabilities_probe_count INTEGER DEFAULT 0");
+                    Log.Info("[DB] Columna 'capabilities_probe_count' agregada a tabla printers");
+                }
+                if (!hasCapProbeDuration)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN capabilities_probe_duration_ms INTEGER");
+                    Log.Info("[DB] Columna 'capabilities_probe_duration_ms' agregada a tabla printers");
+                }
+                if (!hasCapLastError)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN capabilities_last_error TEXT");
+                    Log.Info("[DB] Columna 'capabilities_last_error' agregada a tabla printers");
+                }
+                if (!hasCapLastTrigger)
+                {
+                    Execute("ALTER TABLE printers ADD COLUMN capabilities_last_trigger TEXT");
+                    Log.Info("[DB] Columna 'capabilities_last_trigger' agregada a tabla printers");
+                }
             }
             catch (Exception ex)
             {
-                Log.Warn("[DB] Error en migraciones de columnas (printers): " + ex.Message);
+                LogMigracion("migraciones de columnas (printers)", ex);
             }
 
             // Migración: agregar columna ip_servidor a print_jobs si no existe
@@ -208,7 +329,7 @@ namespace PrinterServices.Data
             }
             catch (Exception ex)
             {
-                Log.Warn("[DB] Error en migraciones de columnas (print_jobs): " + ex.Message); // Log de error
+                LogMigracion("migraciones de columnas (print_jobs)", ex);
             }
 
             // Fase 9: Migración — agregar columna es_cliente a job_status_callbacks si no existe
@@ -234,7 +355,7 @@ namespace PrinterServices.Data
             }
             catch (Exception ex)
             {
-                Log.Warn("[DB] Error en migración es_cliente (job_status_callbacks): " + ex.Message);
+                LogMigracion("migración es_cliente (job_status_callbacks)", ex);
             }
 
             // Migración: agregar columna printer_response a print_jobs si no existe
@@ -260,7 +381,7 @@ namespace PrinterServices.Data
             }
             catch (Exception ex)
             {
-                Log.Warn("[DB] Error en migración printer_response: " + ex.Message);
+                LogMigracion("migración printer_response (print_jobs)", ex);
             }
 
             // Migración: agregar columnas del diseñador de comandas a print_jobs
@@ -292,7 +413,7 @@ namespace PrinterServices.Data
             }
             catch (Exception ex)
             {
-                Log.Warn("[DB] Error en migración diseñador comandas (print_jobs): " + ex.Message);
+                LogMigracion("migración diseñador comandas (print_jobs)", ex);
             }
 
             // Migración: columnas printer_response + printer_response_legend en printer_status_log
@@ -326,7 +447,7 @@ namespace PrinterServices.Data
             }
             catch (Exception ex)
             {
-                Log.Warn("[DB] Error en migración printer_response (printer_status_log): " + ex.Message);
+                LogMigracion("migración printer_response (printer_status_log)", ex);
             }
 
             // Crear índices adicionales
@@ -376,6 +497,28 @@ namespace PrinterServices.Data
             {
                 base.Close();
                 _instance = null;
+            }
+        }
+
+        /// <summary>
+        /// Loguea la excepción de una migración de columna distinguiendo el caso
+        /// "la columna ya existe" (normal en todo arranque posterior al primero)
+        /// del resto (error real que merece atención).
+        /// </summary>
+        private static void LogMigracion(string contextoMigracion, Exception ex)
+        {
+            string mensaje = ex?.Message ?? "";
+            bool yaExiste = mensaje.IndexOf("duplicate column", StringComparison.OrdinalIgnoreCase) >= 0
+                         || mensaje.IndexOf("already exists", StringComparison.OrdinalIgnoreCase) >= 0;
+
+            if (yaExiste)
+            {
+                // No es error — la migración ya se aplicó en un arranque anterior.
+                Log.DebugFormat("[DB] {0}: ya aplicada anteriormente", contextoMigracion);
+            }
+            else
+            {
+                Log.WarnFormat("[DB] Error en {0}: {1}", contextoMigracion, mensaje);
             }
         }
     }

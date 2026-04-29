@@ -28,15 +28,81 @@ namespace PrinterServices.Queue
         private int _totalEnqueued;
         private int _totalProcessed;
 
+        // Contador de jobs que están imprimiendo (PRINTING) por impresora.
+        // RAZÓN: el probe de capacidades corre en el mismo tick del StatusMonitor y
+        // NO debe ejecutarse si hay un job imprimiendo o en cola para esa impresora,
+        // porque competiría por el port lock que el PrintWorker necesita enseguida.
+        // Contar en memoria es O(1), mucho más barato que consultar la BD cada tick.
+        private readonly ConcurrentDictionary<string, int> _jobsImprimiendoPorImpresora
+            = new ConcurrentDictionary<string, int>();
+
+        // Evento que se dispara cada vez que un job entra a la cola.
+        // El ProbeScheduler lo escucha para cancelar un probe en curso sobre la misma
+        // impresora y liberar el port lock al PrintWorker de inmediato.
+        // El argumento string es el ImpresoraId.
+        public event EventHandler<string> JobEncolado;
+
         public int PendingCount { get { return _queue.Count; } }
         public int TotalEnqueued { get { return _totalEnqueued; } }
         public int TotalProcessed { get { return _totalProcessed; } }
+
+        /// <summary>
+        /// ¿Tiene esta impresora al menos un job pendiente en cola o imprimiendo?
+        /// Se usa como "freno" antes de correr el probe: si está ocupada, salteamos.
+        /// </summary>
+        public bool TieneJobsEnColaOImprimiendo(string impresoraId)
+        {
+            if (string.IsNullOrEmpty(impresoraId)) return false;
+
+            // Primero el contador atómico de jobs imprimiendo (barato).
+            int imprimiendo;
+            if (_jobsImprimiendoPorImpresora.TryGetValue(impresoraId, out imprimiendo) && imprimiendo > 0)
+                return true;
+
+            // Después la cola pendiente (iteración snapshot consistente).
+            foreach (var j in _queue)
+            {
+                if (j != null && string.Equals(j.ImpresoraId, impresoraId, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>Un job empezó a imprimir: suma 1 al contador de la impresora.</summary>
+        internal void MarcarJobImprimiendo(string impresoraId)
+        {
+            if (string.IsNullOrEmpty(impresoraId)) return;
+            _jobsImprimiendoPorImpresora.AddOrUpdate(impresoraId, 1, (_, v) => v + 1);
+        }
+
+        /// <summary>Un job dejó de imprimir (DONE/FAILED/WAITING): resta 1. Nunca baja de 0.</summary>
+        internal void QuitarJobImprimiendo(string impresoraId)
+        {
+            if (string.IsNullOrEmpty(impresoraId)) return;
+            _jobsImprimiendoPorImpresora.AddOrUpdate(impresoraId, 0, (_, v) => Math.Max(0, v - 1));
+        }
 
         public PrintJobManager(PrinterServiceDb db)
         {
             _db = db;
             _queue = new ConcurrentQueue<PrintJob>();
             _signal = new SemaphoreSlim(0);
+        }
+
+        /// <summary>
+        /// Avisa al ProbeScheduler que un job acaba de entrar a la cola para esta
+        /// impresora. Si un listener lanza excepción, la tragamos — no debe afectar
+        /// el encolado, que es el camino crítico.
+        /// </summary>
+        private void NotificarJobEncolado(string impresoraId)
+        {
+            var handler = JobEncolado;
+            if (handler == null || string.IsNullOrEmpty(impresoraId)) return;
+            try { handler(this, impresoraId); }
+            catch (Exception ex)
+            {
+                Log.Warn("[QUEUE] Listener de JobEncolado falló (ignorado): " + ex.Message);
+            }
         }
 
         // ═══════════════════════════════════════════════════════════════
@@ -98,6 +164,7 @@ namespace PrinterServices.Queue
 
             job.Estado = PrintJobStatus.Printing;
             UpdateJobInDb(job);
+            MarcarJobImprimiendo(job.ImpresoraId);
             return true;
         }
 
@@ -201,6 +268,7 @@ namespace PrinterServices.Queue
             _queue.Enqueue(job);
             Interlocked.Increment(ref _totalEnqueued);
             _signal.Release();
+            NotificarJobEncolado(job.ImpresoraId);
 
             Log.InfoFormat("[QUEUE] Job {0} encolado → impresora={1} ip={2} tipo={3} area={4}",
                 job.JobId, job.ImpresoraNombre ?? job.ImpresoraId, job.ImpresoraIp, job.TipoImpresion, job.AreaImpresion ?? "-");
@@ -247,6 +315,7 @@ namespace PrinterServices.Queue
 
             _queue.Enqueue(job);
             _signal.Release();
+            NotificarJobEncolado(job.ImpresoraId);
 
             Log.InfoFormat("[QUEUE] Job {0} re-encolado desde {1} (reintento {2}/{3})",
                 job.JobId, estadoPrevio, job.Reintentos, job.MaxReintentos);
@@ -264,6 +333,7 @@ namespace PrinterServices.Queue
             job.Estado = PrintJobStatus.Done;
             job.FechaImpresion = DateTime.Now;
             UpdateJobInDb(job);
+            QuitarJobImprimiendo(job.ImpresoraId);
 
             Log.InfoFormat("[QUEUE] Job {0} completado → impresora={1}",
                 job.JobId, job.ImpresoraNombre ?? job.ImpresoraId);
@@ -279,11 +349,13 @@ namespace PrinterServices.Queue
                 Log.WarnFormat("[GUARD] Job {0} ya es {1} — MarkFailed rechazado", job.JobId, ramState.Value);
                 return false;
             }
+            bool estabaImprimiendo = ramState.HasValue && ramState.Value == PrintJobStatus.Printing;
             _jobStates[job.JobId] = PrintJobStatus.Failed;
 
             job.Estado = PrintJobStatus.Failed;
             job.ErrorMensaje = error;
             UpdateJobInDb(job);
+            if (estabaImprimiendo) QuitarJobImprimiendo(job.ImpresoraId);
 
             Log.WarnFormat("[QUEUE] Job {0} FALLIDO → {1}", job.JobId, error);
             return true;
@@ -297,11 +369,13 @@ namespace PrinterServices.Queue
                 Log.WarnFormat("[GUARD] Job {0} ya es {1} — MarkWaiting rechazado", job.JobId, ramState.Value);
                 return false;
             }
+            bool estabaImprimiendo = ramState.HasValue && ramState.Value == PrintJobStatus.Printing;
             _jobStates[job.JobId] = PrintJobStatus.Waiting;
 
             job.Estado = PrintJobStatus.Waiting;
             job.ErrorMensaje = reason;
             UpdateJobInDb(job);
+            if (estabaImprimiendo) QuitarJobImprimiendo(job.ImpresoraId);
 
             Log.InfoFormat("[QUEUE] Job {0} en ESPERA → {1}", job.JobId, reason);
             return true;
@@ -318,6 +392,7 @@ namespace PrinterServices.Queue
             job.Estado = PrintJobStatus.Expired;
             job.ErrorMensaje = reason;
             UpdateJobInDb(job);
+            // WAITING → EXPIRED: el job no estaba PRINTING, no hay in-flight que decrementar.
 
             Log.WarnFormat("[QUEUE] Job {0} EXPIRADO → {1}", job.JobId, reason);
             return true;
@@ -339,6 +414,7 @@ namespace PrinterServices.Queue
 
             _queue.Enqueue(job);
             _signal.Release();
+            NotificarJobEncolado(job.ImpresoraId);
 
             Log.InfoFormat("[QUEUE] Job {0} re-encolado desde WAITING → impresora={1}",
                 job.JobId, job.ImpresoraNombre ?? job.ImpresoraId);
@@ -390,6 +466,7 @@ namespace PrinterServices.Queue
                     _jobStates[job.JobId] = job.Estado;
                     _queue.Enqueue(job);
                     _signal.Release();
+                    NotificarJobEncolado(job.ImpresoraId);
                     recovered++;
                 }
 
@@ -438,6 +515,7 @@ namespace PrinterServices.Queue
 
             _queue.Enqueue(job);
             _signal.Release();
+            NotificarJobEncolado(job.ImpresoraId);
 
             Log.InfoFormat("[QUEUE] Job {0} RetryManual desde {1} (reintento {2}/{3})",
                 job.JobId, estadoPrevio, job.Reintentos, job.MaxReintentos);

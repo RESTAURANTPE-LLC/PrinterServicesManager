@@ -79,7 +79,14 @@
 
         <!-- Impresoras -->
         <section class="mb-6 bg-gray-800 p-4 rounded-lg">
-            <h2 class="text-2xl font-semibold mb-3">🖨️ Impresoras</h2>
+            <div class="flex justify-between items-center mb-3 flex-wrap gap-2">
+                <h2 class="text-2xl font-semibold">🖨️ Impresoras</h2>
+                <button onclick="abrirBuscadorImpresoras()"
+                    class="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-white font-semibold"
+                    title="Busca impresoras en la red por todos los protocolos conocidos: ENPC (Epson sin IP), mDNS/Bonjour, SNMP y barrido TCP :9100">
+                    🔎 Buscar impresoras en la red
+                </button>
+            </div>
             <div id="printers" class="overflow-x-auto">
                 <div class="text-gray-400">Cargando...</div>
             </div>
@@ -185,8 +192,8 @@
                 <h2 class="text-2xl font-bold">📋 Detalle del Job</h2>
                 <button onclick="closeJobModal()" class="text-2xl hover:text-red-500">&times;</button>
             </div>
-            <div id="job-detail" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <!-- Contenido del modal aquí -->
+            <div id="job-detail" class="space-y-4">
+                <!-- Contenido del modal aquí (rediseñado con 4 secciones) -->
             </div>
         </div>
     </div>
@@ -200,6 +207,27 @@
             </div>
             <div id="notif-content-detail">
                 <!-- Contenido del modal aquí -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Buscador de Impresoras (multi-protocolo) -->
+    <div id="discovery-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50">
+        <div class="bg-gray-800 rounded-lg p-6 w-11/12 max-w-6xl max-h-[90vh] overflow-y-auto">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-2xl font-bold">🔎 Buscar impresoras en la red</h2>
+                <button onclick="cerrarBuscadorImpresoras()" class="text-2xl hover:text-red-500">&times;</button>
+            </div>
+            <p class="text-sm text-gray-400 mb-4">
+                Busca impresoras por <strong>4 protocolos</strong> en paralelo:
+                <span title="Protocolo propietario de Epson. Detecta Epson incluso SIN IP configurada.">ENPC</span>,
+                <span title="Multicast estándar para descubrir servicios en LAN. Detecta HP, Brother, Canon, Epson modernas.">mDNS/Bonjour</span>,
+                <span title="Consulta estándar a IP 161 por info del dispositivo. Detecta casi todas las impresoras de gama media-alta con IP.">SNMP</span>,
+                y <span title="Barrido de todas las IPs de la subnet local probando puerto 9100. Detecta cualquier clon ESC/POS con IP.">barrido TCP puerto 9100</span>.
+                Corre en segundo plano sin interrumpir la impresión.
+            </p>
+            <div id="discovery-content">
+                <!-- Contenido dinámico -->
             </div>
         </div>
     </div>
@@ -383,6 +411,25 @@
                 fetchDashboardData();
             } catch (e) {
                 alert('Error eliminando job: ' + e.message);
+            }
+        }
+
+        // Reintentar manualmente la impresión de un job desde el dashboard.
+        // Llama al endpoint existente POST /api/job/{jobId}/retry que re-encola.
+        async function reintentarImpresion(jobId) {
+            if (!confirm('¿Reenviar este job a la impresora?\n\nSe usará el mismo contenido original. Útil cuando el ticket anterior salió con basura o no salió.')) return;
+            try {
+                const resp = await fetch(window.location.origin + '/api/job/' + jobId + '/retry', { method: 'POST' });
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok) {
+                    alert('⚠️ No se pudo reintentar: ' + (data.error || 'HTTP ' + resp.status));
+                    return;
+                }
+                alert('✅ Job reencolado. Se reintentará la impresión en segundos.');
+                loadHistory(typeof currentPage === 'undefined' ? 1 : currentPage);
+                fetchDashboardData();
+            } catch (e) {
+                alert('❌ Error: ' + e.message);
             }
         }
 
@@ -596,6 +643,11 @@
                                         class="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded">
                                         Editar
                                     </button>
+                                    <button onclick="resetPrinter('${p.id}', '${(p.nombre || '').replace(/'/g, "\\'")}')"
+                                        class="px-2 py-1 bg-red-600 hover:bg-red-700 text-white text-xs rounded ml-1"
+                                        title="Enviar ESC @ reset">
+                                        Reset
+                                    </button>
                                 </td>
                             </tr>
                         `).join('')}
@@ -614,83 +666,612 @@
             }
         }
 
-        // Función para abrir modal de job
+        // ═══════════════════════════════════════════════════════════════════════
+        // Helpers de UX: traducción de términos técnicos a lenguaje humano
+        // Pensados para que un mesero/cajero/operador entienda qué pasó sin saber
+        // nada de ESC/POS, DLE EOT ni TCP.
+        // ═══════════════════════════════════════════════════════════════════════
+
+        // Traduce un nombre simbólico de comando ESC/POS a descripción humana.
+        function explicarComando(nombreCmd) {
+            const diccionario = {
+                'ESC_INIT': '🧹 Reiniciar impresora',
+                'ESC_INIT_CLEANUP': '🧹 Limpieza final de la impresora',
+                'DLE_EOT_1': '🔍 Consulta: ¿Impresora lista?',
+                'DLE_EOT_2': '🔍 Consulta: ¿Tapa cerrada?',
+                'DLE_EOT_3': '🔍 Consulta: ¿Hay errores?',
+                'DLE_EOT_4': '🔍 Consulta: ¿Hay papel?',
+                'DLE_ENQ_2': '🔄 Limpiar errores recuperables',
+                'GS_I_67': '📄 Pedir versión de firmware',
+                'GS_A_ENABLE_ASB': '📡 Activar avisos automáticos',
+                'GS_A_DISABLE_ASB': '📡 Desactivar avisos automáticos',
+                'GS_PAREN_H_FN48': '✅ Pedir confirmación de procesamiento',
+                'GS_PAREN_K_SPEED': '⚙️ Ajustar velocidad de impresión',
+                'PAYLOAD_BITMAP': '🖼️ Enviar imagen del ticket',
+                'PAYLOAD_TEXT': '📝 Enviar texto del ticket',
+                'RESPONSE_GS_I_67': '📄 Respuesta: firmware recibido',
+                'RESPONSE_PROCESS_ID': '✅ Respuesta: job confirmado por impresora',
+                'RESPONSE_ASB': '📡 Respuesta: estado automático',
+                'RESPONSE_DLE_EOT_1': '🔍 Respuesta: estado impresora',
+                'RESPONSE_DLE_EOT_2': '🔍 Respuesta: estado tapa',
+                'RESPONSE_DLE_EOT_3': '🔍 Respuesta: estado errores',
+                'RESPONSE_DLE_EOT_4': '🔍 Respuesta: estado papel',
+                'METHOD_SELECTED': '🎯 Método elegido para confirmar impresión',
+                'DECISION_FAILED': '❌ Decisión: impresión falló',
+                'DECISION_WAITING': '⏳ Decisión: en espera',
+                'FINAL_DECISION': '🏁 Decisión final del job',
+                'PORT_LOCK_ACQUIRED': '🔒 Puerto reservado para esta impresora',
+                'CONFIRMED': '✅ Confirmado por la impresora',
+                'NOT_CONFIRMED': '⚠️ Sin confirmación de la impresora',
+                'STATUS_CHANGED': '⚠️ Estado cambió durante la impresión',
+                'CAPS_LOADED': '📋 Capacidades de la impresora cargadas',
+                'FORCED_PROBE': '🔎 Detección de capacidades forzada'
+            };
+            return diccionario[nombreCmd] || ('🔧 ' + (nombreCmd || 'Comando'));
+        }
+
+        // Traduce la FASE del flujo a lenguaje humano.
+        function explicarFase(fase) {
+            const diccionario = {
+                'capability_probe': '🔎 Detección de capacidades',
+                'pre_check': '🩺 Chequeo ANTES de imprimir',
+                'pre_send': '📥 Preparación del envío',
+                'send': '📤 Envío del ticket',
+                'confirmation': '✅ Confirmación de impresión',
+                'post_check': '🩺 Chequeo DESPUÉS de imprimir',
+                'cleanup': '🧹 Limpieza final',
+                'info': '💬 Decisión tomada'
+            };
+            return diccionario[fase] || fase;
+        }
+
+        // Ícono según dirección out/in/timeout/info.
+        function iconoDireccion(direction) {
+            if (direction === 'out') return '<span title="Enviado a la impresora" class="text-blue-400">➡️</span>';
+            if (direction === 'in') return '<span title="Recibido de la impresora" class="text-green-400">⬅️</span>';
+            if (direction === 'timeout') return '<span title="La impresora no respondió a tiempo" class="text-red-400">⏱️</span>';
+            return '<span title="Decisión del sistema" class="text-gray-400">💬</span>';
+        }
+
+        // Badge del perfil de capacidades (verde/amarillo/naranja/rojo/gris).
+        // El texto es autodescriptivo: no hace falta abrir tooltip para saber de qué tipo es.
+        function badgePerfilCapacidades(profile) {
+            if (!profile || profile === 'unknown')
+                return '<span class="inline-block px-2 py-1 rounded text-xs bg-gray-600 text-gray-100" title="La impresora todavía no fue analizada. Pasa en segundos automáticamente.">❓ Sin analizar</span>';
+            if (profile === 'epson_genuine')
+                return '<span class="inline-block px-2 py-1 rounded text-xs bg-green-700 text-white" title="Es una impresora Epson original. Soporta confirmación real de impresión — máxima confianza.">🎯 Epson original</span>';
+            if (profile === 'clone_compatible')
+                return '<span class="inline-block px-2 py-1 rounded text-xs bg-yellow-600 text-white" title="Es un clon de ESC/POS: responde consultas básicas pero no confirma procesamiento del job. Confianza media.">🔧 Clon compatible</span>';
+            if (profile === 'clone_minimal')
+                return '<span class="inline-block px-2 py-1 rounded text-xs bg-orange-600 text-white" title="Es un clon básico: acepta bytes pero no responde consultas. Confianza baja — riesgo de falso positivo.">⚠️ Clon básico</span>';
+            if (profile === 'probe_failed')
+                return '<span class="inline-block px-2 py-1 rounded text-xs bg-red-700 text-white" title="Hubo un error al analizar la impresora. Revisa si está conectada.">❌ Error al analizar</span>';
+            return '<span class="inline-block px-2 py-1 rounded text-xs bg-gray-600 text-white">' + profile + '</span>';
+        }
+
+        // Badge de confianza del resultado según método de confirmación usado.
+        function badgeConfianzaIntento(intento) {
+            if (!intento) return '';
+            if (intento.outcome !== 'DONE')
+                return '<span class="px-2 py-1 rounded text-xs bg-red-700 text-white" title="El intento NO terminó en impresión exitosa">❌ No se imprimió</span>';
+            if (intento.suspiciousFastSend)
+                return '<span class="px-2 py-1 rounded text-xs bg-yellow-600 text-white" title="El envío fue sospechosamente rápido. Posible falso positivo — revisá si el ticket salió en papel.">⚠️ Sospechoso</span>';
+            if (intento.confirmationMethod === 'process_id' && intento.confirmationResult === 'confirmed')
+                return '<span class="px-2 py-1 rounded text-xs bg-green-700 text-white" title="La impresora confirmó que procesó el job. Máxima confianza.">🟢 Confirmado</span>';
+            if (intento.confirmationMethod === 'post_dle_eot')
+                return '<span class="px-2 py-1 rounded text-xs bg-yellow-600 text-white" title="Consultado antes y después del envío. Confianza media.">🟡 Verificado</span>';
+            if (intento.confirmationMethod === 'backpressure_timing')
+                return '<span class="px-2 py-1 rounded text-xs bg-orange-600 text-white" title="Solo se midió el tiempo de envío TCP. Confianza baja.">🟠 Solo tiempo</span>';
+            return '<span class="px-2 py-1 rounded text-xs bg-green-700 text-white">✅ Terminado</span>';
+        }
+
+        // Formatea ms como "1.2s" o "450ms".
+        function formatearMs(ms) {
+            if (ms == null || ms === 0) return '-';
+            if (ms >= 1000) return (ms / 1000).toFixed(2) + 's';
+            return ms + 'ms';
+        }
+
+        // Formatea fecha local para mostrar.
+        function formatearFechaLocal(isoLocal) {
+            if (!isoLocal) return '-';
+            // timestamp_local viene como "2026-04-22 14:37:35.123"; mostrar tal cual.
+            return isoLocal;
+        }
+
+        // Escapa HTML para seguridad al insertar datos en el modal.
+        function escaparHtml(s) {
+            if (s == null) return '';
+            return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        // Función para abrir modal de job (REDISEÑADO: 4 secciones con UX para no técnicos)
         async function showJobDetail(jobId) {
             try {
                 const response = await fetch(window.location.origin + '/api/dashboard/job/' + jobId);
                 const job = await response.json();
-                
-                document.getElementById('job-detail').innerHTML = `
-                    <div class="bg-gray-700 p-4 rounded">
-                        <p class="text-sm text-gray-400">Job ID</p>
-                        <p class="text-lg font-mono">${job.jobId}</p>
-                    </div>
-                    <div class="bg-gray-700 p-4 rounded">
-                        <p class="text-sm text-gray-400">Comanda ID</p>
-                        <p class="text-lg">${job.comandaId || '-'}</p>
-                    </div>
-                    <div class="bg-gray-700 p-4 rounded">
-                        <p class="text-sm text-gray-400">Impresora</p>
-                        <p class="text-lg font-semibold">${job.impresoraNombre}</p>
-                    </div>
-                    <div class="bg-gray-700 p-4 rounded">
-                        <p class="text-sm text-gray-400">IP:Puerto</p>
-                        <p class="text-lg font-mono">${job.impresoraIp}:${job.puerto}</p>
-                    </div>
-                    <div class="bg-gray-700 p-4 rounded">
-                        <p class="text-sm text-gray-400">Estado</p>
-                        <p class="text-lg font-bold">${job.estado}</p>
-                    </div>
-                    <div class="bg-gray-700 p-4 rounded">
-                        <p class="text-sm text-gray-400">Reintentos</p>
-                        <p class="text-lg">${job.reintentos} / ${job.maxReintentos}</p>
-                    </div>
-                    <div class="bg-gray-700 p-4 rounded">
-                        <p class="text-sm text-gray-400">Tipo Impresión</p>
-                        <p class="text-lg">${job.tipoImpresion || '-'}</p>
-                    </div>
-                    <div class="bg-gray-700 p-4 rounded">
-                        <p class="text-sm text-gray-400">Copias</p>
-                        <p class="text-lg">${job.copias}</p>
-                    </div>
-                    <div class="bg-gray-700 p-4 rounded">
-                        <p class="text-sm text-gray-400">Modelo</p>
-                        <p class="text-lg">${job.modelo || '-'}</p>
-                    </div>
-                    <div class="bg-gray-700 p-4 rounded">
-                        <p class="text-sm text-gray-400">Device ID Origen</p>
-                        <p class="text-lg font-mono text-xs">${job.deviceIdOrigen || '-'}</p>
-                    </div>
-                    <div class="bg-gray-700 p-4 rounded">
-                        <p class="text-sm text-gray-400">IP Origen</p>
-                        <p class="text-lg">${job.ipOrigen || '-'}</p>
-                    </div>
-                    <div class="bg-gray-700 p-4 rounded">
-                        <p class="text-sm text-gray-400">Área Impresión</p>
-                        <p class="text-lg font-semibold text-yellow-300">${job.areaImpresion || '-'}</p>
-                    </div>
-                    <div class="bg-gray-700 p-4 rounded">
-                        <p class="text-sm text-gray-400">Fecha Creación</p>
-                        <p class="text-lg">${new Date(job.fechaCreacion).toLocaleString()}</p>
-                    </div>
-                    <div class="bg-gray-700 p-4 rounded col-span-2">
-                        <p class="text-sm text-gray-400">Respuesta Impresora (DLE EOT)</p>
-                        <p class="text-sm font-mono ${job.printerResponse && job.printerResponse.startsWith('OFFLINE') ? 'text-red-400' : 'text-green-400'}">${job.printerResponse || 'Sin respuesta'}</p>
-                    </div>
-                    <div class="bg-gray-700 p-4 rounded col-span-2">
-                        <p class="text-sm text-gray-400">Error</p>
-                        <p class="text-sm text-red-400">${job.errorMensaje || 'Sin errores'}</p>
-                    </div>
-                    <div class="bg-gray-700 p-4 rounded col-span-2">
-                        <p class="text-sm text-gray-400 mb-2">Contenido</p>
-                        <pre class="text-xs bg-gray-900 p-2 rounded overflow-x-auto max-h-96 overflow-y-auto">${job.contenido ? job.contenido : '-'}</pre>
-                    </div>
-                `;
-                
+
+                // Construcción de secciones
+                const htmlGeneral = renderSeccionGeneral(job);
+                const htmlCapacidades = renderSeccionCapacidades(job);
+                const htmlIntentos = renderSeccionIntentos(job);
+                const htmlBitmap = renderSeccionBitmap(job);
+                const htmlContenido = renderSeccionContenido(job);
+
+                document.getElementById('job-detail').innerHTML =
+                    htmlGeneral + htmlCapacidades + htmlBitmap + htmlIntentos + htmlContenido;
+
                 document.getElementById('job-modal').classList.remove('hidden');
                 document.getElementById('job-modal').classList.add('flex');
             } catch (error) {
                 console.error('Error loading job detail:', error);
+            }
+        }
+
+        // ── Sección 1: Info general del Job ─────────────────────────────────────
+        function renderSeccionGeneral(job) {
+            const estadoColor = job.estado === 'DONE' ? 'bg-green-700' :
+                                job.estado === 'FAILED' ? 'bg-red-700' :
+                                job.estado === 'WAITING' ? 'bg-yellow-600' : 'bg-gray-600';
+            const dleLegend = job.printerResponseLegend || (job.printerResponse ? 'Sin decodificar' : 'Sin respuesta');
+            const dleColor = job.printerResponse && job.printerResponse.startsWith('OFFLINE') ? 'text-red-400' :
+                             job.printerResponse ? 'text-green-400' : 'text-gray-400';
+
+            return `
+                <div class="bg-gray-800 rounded-lg p-5 border border-gray-700">
+                    <h3 class="text-xl font-bold mb-3 flex items-center gap-2 flex-wrap">
+                        📋 Información del Job
+                        <span class="px-3 py-1 rounded text-sm ${estadoColor}">${escaparHtml(job.estado)}</span>
+                        <button onclick="reintentarImpresion('${escaparHtml(job.jobId)}')"
+                            class="ml-auto px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm font-normal"
+                            title="Vuelve a enviar este mismo job a la impresora. Útil cuando el ticket salió con basura o no salió.">
+                            🔄 Reintentar impresión
+                        </button>
+                    </h3>
+                    <div class="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+                        <div><span class="text-gray-400">Job ID:</span><br><span class="font-mono text-xs">${escaparHtml(job.jobId)}</span></div>
+                        <div><span class="text-gray-400">Comanda ID:</span><br><span>${escaparHtml(job.comandaId || '-')}</span></div>
+                        <div><span class="text-gray-400">Área:</span><br><span class="font-semibold text-yellow-300">${escaparHtml(job.areaImpresion || '-')}</span></div>
+                        <div><span class="text-gray-400">Impresora:</span><br><span class="font-semibold">${escaparHtml(job.impresoraNombre)}</span></div>
+                        <div><span class="text-gray-400">Dirección:</span><br><span class="font-mono text-xs">${escaparHtml(job.impresoraIp)}:${job.puerto}</span></div>
+                        <div><span class="text-gray-400" title="Tipo de documento impreso">Tipo:</span><br><span>${escaparHtml(job.tipoImpresion || '-')}</span></div>
+                        <div><span class="text-gray-400">Copias:</span><br><span>${job.copias}</span></div>
+                        <div><span class="text-gray-400" title="Intentos automáticos hechos / máximo permitido">Reintentos:</span><br><span>${job.reintentos} / ${job.maxReintentos}</span></div>
+                        <div><span class="text-gray-400" title="Origen del pedido de impresión">Device origen:</span><br><span class="font-mono text-xs">${escaparHtml(job.deviceIdOrigen || '-')}</span></div>
+                        <div><span class="text-gray-400">Creado:</span><br><span>${job.fechaCreacion ? new Date(job.fechaCreacion).toLocaleString() : '-'}</span></div>
+                        <div><span class="text-gray-400">Impreso:</span><br><span>${job.fechaImpresion ? new Date(job.fechaImpresion).toLocaleString() : '-'}</span></div>
+                        <div><span class="text-gray-400" title="Tiempo total desde que entró a la cola hasta que terminó">Duración total:</span><br><span>${formatearMs(job.duracionMs)}</span></div>
+                    </div>
+                    <div class="mt-4 p-3 bg-gray-900 rounded border border-gray-700">
+                        <div class="text-xs text-gray-400 mb-1 flex items-center gap-1" title="Respuesta cruda de la impresora cuando se le preguntó su estado antes de imprimir">
+                            🔍 Respuesta de la impresora (pre-check)
+                            <span class="cursor-help text-gray-500" title="P=Printer, O=Offline, E=Error, S=Sensor. Si dice 'P:16 O:12 E:12 S:12' la impresora está lista.">(?)</span>
+                        </div>
+                        <div class="font-mono text-sm ${dleColor}">${escaparHtml(job.printerResponse || 'Sin respuesta')}</div>
+                        <div class="text-xs text-gray-300 mt-1 italic">${escaparHtml(dleLegend)}</div>
+                    </div>
+                    ${job.errorMensaje ? `
+                    <div class="mt-3 p-3 bg-red-950 rounded border border-red-700">
+                        <div class="text-xs text-red-300 mb-1">⚠️ Último mensaje de error</div>
+                        <div class="text-sm text-red-200">${escaparHtml(job.errorMensaje)}</div>
+                    </div>` : ''}
+                </div>
+            `;
+        }
+
+        // ── Sección 2: Capacidades de la impresora ──────────────────────────────
+        function renderSeccionCapacidades(job) {
+            const c = job.capabilities;
+            if (!c) {
+                return `
+                    <div class="bg-gray-800 rounded-lg p-5 border border-gray-700">
+                        <h3 class="text-xl font-bold mb-2">🖨️ Capacidades de la impresora</h3>
+                        <p class="text-sm text-gray-400 italic">No hay información de capacidades para esta impresora.</p>
+                    </div>
+                `;
+            }
+            const ultimaProbe = c.detectedAt ? new Date(c.detectedAt).toLocaleString() : 'Nunca';
+            const iconoSi = '<span class="text-green-400">✓</span>';
+            const iconoNo = '<span class="text-red-400">✗</span>';
+            const iconoQuestion = '<span class="text-gray-500">?</span>';
+            const dleBits = c.supportsDleEotBits
+                ? ('<span class="text-xs text-gray-400">(' + escaparHtml(c.supportsDleEotBits) + ')</span>')
+                : '';
+
+            return `
+                <div class="bg-gray-800 rounded-lg p-5 border border-gray-700">
+                    <h3 class="text-xl font-bold mb-3 flex items-center gap-2">
+                        🖨️ Capacidades de la impresora
+                        ${badgePerfilCapacidades(c.profile)}
+                    </h3>
+                    <p class="text-xs text-gray-400 mb-3 italic">
+                        Qué puede hacer esta impresora. PrinterServices lo detecta automáticamente cada 24 horas.
+                    </p>
+                    <div class="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+                        <div>
+                            <span class="text-gray-400" title="Consultas básicas de estado (papel, tapa, errores)">¿Consultas básicas?</span><br>
+                            ${c.supportsDleEot ? iconoSi : iconoNo} ${c.supportsDleEot ? 'Sí' : 'No'} ${dleBits}
+                        </div>
+                        <div>
+                            <span class="text-gray-400" title="La impresora puede avisar automáticamente cuando cambia algo (ej: se acabó el papel)">¿Avisos automáticos?</span><br>
+                            ${c.supportsAsb ? iconoSi : iconoNo} ${c.supportsAsb ? 'Sí' : 'No'}
+                        </div>
+                        <div>
+                            <span class="text-gray-400" title="La impresora puede confirmar que procesó un job (no solo que recibió los bytes). Es el método más confiable.">¿Confirma procesamiento?</span><br>
+                            ${c.supportsProcessIdResponse ? iconoSi : iconoNo} ${c.supportsProcessIdResponse ? 'Sí' : 'No'}
+                        </div>
+                        <div class="md:col-span-2">
+                            <span class="text-gray-400">Firmware:</span><br>
+                            <span class="font-mono text-xs">${escaparHtml(c.firmwareParsed || 'Desconocido')}</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-400" title="Cuándo se analizó la impresora por última vez">Último análisis:</span><br>
+                            <span class="text-xs">${ultimaProbe}</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-400">Total análisis:</span><br>
+                            <span>${c.probeCount || 0}</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-400" title="Cuánto tardó el último análisis">Duración análisis:</span><br>
+                            <span>${formatearMs(c.probeDurationMs)}</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-400" title="Qué disparó el último análisis: periódico cada 24h, sincronización desde QuipuNet, o manual desde el dashboard">Origen del análisis:</span><br>
+                            <span class="text-xs">${escaparHtml(c.lastTrigger || '-')}</span>
+                        </div>
+                    </div>
+                    ${c.lastError ? `
+                    <div class="mt-3 p-2 bg-red-950 rounded text-xs text-red-300">
+                        ⚠️ Último error: ${escaparHtml(c.lastError)}
+                    </div>` : ''}
+                    <div class="mt-3 flex gap-2 flex-wrap">
+                        <button onclick="forzarProbe('${escaparHtml(job.impresoraId)}')"
+                            class="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm"
+                            title="Pide al sistema que analice la impresora ahora. Útil si cambiaste de impresora o actualizaste su firmware.">
+                            🔎 Volver a analizar esta impresora
+                        </button>
+                        <button onclick="toggleProbeLog('${escaparHtml(job.impresoraId)}')"
+                            class="px-3 py-1 bg-purple-600 hover:bg-purple-700 rounded text-sm"
+                            title="Mostrar/ocultar qué comandos exactos se le enviaron a la impresora durante el último análisis y cómo respondió.">
+                            📜 Ver comandos del último análisis
+                        </button>
+                    </div>
+                    <div id="probe-log-${escaparHtml(job.impresoraId)}" class="mt-3 hidden"></div>
+                </div>
+            `;
+        }
+
+        // Muestra/oculta el transcript del último probe de la impresora.
+        // Carga bajo demanda la primera vez (para no cargar siempre que se abre el modal).
+        async function toggleProbeLog(impresoraId) {
+            const contenedor = document.getElementById('probe-log-' + impresoraId);
+            if (!contenedor) return;
+            if (!contenedor.classList.contains('hidden')) {
+                contenedor.classList.add('hidden');
+                return;
+            }
+            // Cargar si todavía no se cargó.
+            if (!contenedor.dataset.loaded) {
+                contenedor.innerHTML = '<div class="text-sm text-gray-400 italic p-3">Cargando transcript del análisis...</div>';
+                try {
+                    const resp = await fetch(window.location.origin + '/api/printers/' + encodeURIComponent(impresoraId) + '/probe-log');
+                    const data = await resp.json();
+                    if (!resp.ok) {
+                        contenedor.innerHTML = '<div class="text-sm text-red-400 p-3">❌ Error al cargar: ' + escaparHtml(data.error || resp.status) + '</div>';
+                        return;
+                    }
+                    contenedor.innerHTML = renderProbeLog(data.items || []);
+                    contenedor.dataset.loaded = '1';
+                } catch (e) {
+                    contenedor.innerHTML = '<div class="text-sm text-red-400 p-3">❌ Error: ' + escaparHtml(e.message) + '</div>';
+                    return;
+                }
+            }
+            contenedor.classList.remove('hidden');
+        }
+
+        // Renderiza una tabla con los comandos del último probe.
+        function renderProbeLog(items) {
+            if (!items || items.length === 0) {
+                return '<div class="text-sm text-gray-400 italic p-3 bg-gray-900 rounded border border-gray-700">No hay transcript guardado para el último análisis. Puede que todavía no se haya ejecutado o que hayan pasado muchos análisis desde entonces.</div>';
+            }
+            const filas = items.map(c => {
+                const hex = c.bytesHex ? `<span class="font-mono text-xs">${escaparHtml(c.bytesHex)}</span>` : '<span class="text-gray-500 italic">sin datos</span>';
+                const dur = c.durationMs > 0 ? ('<span class="text-xs text-gray-400">' + c.durationMs + 'ms</span>') : '';
+                return `
+                    <tr class="border-t border-gray-700 hover:bg-gray-800">
+                        <td class="p-1 text-xs text-gray-400">${c.sequenceNum}</td>
+                        <td class="p-1 text-xs">${escaparHtml(c.timestampLocal || '')}</td>
+                        <td class="p-1 text-xs text-gray-400">+${c.offsetMs}ms</td>
+                        <td class="p-1 text-center">${iconoDireccion(c.direction)}</td>
+                        <td class="p-1 text-xs">${escaparHtml(explicarComando(c.commandName))}</td>
+                        <td class="p-1">${hex}</td>
+                        <td class="p-1 text-xs text-gray-300">${escaparHtml(c.notes || 'ok')} ${dur}</td>
+                    </tr>
+                `;
+            }).join('');
+            return `
+                <div class="bg-gray-900 rounded border border-gray-700 p-3">
+                    <p class="text-xs text-gray-400 italic mb-2">
+                        Cronológico de lo que pasó durante el último análisis de la impresora.
+                        ➡️ = enviado &nbsp;&nbsp; ⬅️ = recibido &nbsp;&nbsp; ⏱️ = la impresora no contestó &nbsp;&nbsp; 💬 = decisión del sistema
+                    </p>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-xs">
+                            <thead class="bg-gray-800">
+                                <tr>
+                                    <th class="p-1 text-left">#</th>
+                                    <th class="p-1 text-left">Hora</th>
+                                    <th class="p-1 text-left">Desde inicio</th>
+                                    <th class="p-1 text-center">Dir</th>
+                                    <th class="p-1 text-left">Comando</th>
+                                    <th class="p-1 text-left">Bytes (hex)</th>
+                                    <th class="p-1 text-left">Notas</th>
+                                </tr>
+                            </thead>
+                            <tbody>${filas}</tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Forzar probe de capacidades (botón del modal).
+        async function forzarProbe(impresoraId) {
+            try {
+                const resp = await fetch(window.location.origin + '/api/printers/' + encodeURIComponent(impresoraId) + '/probe-capabilities', { method: 'POST' });
+                const json = await resp.json();
+                if (resp.ok) {
+                    alert('✓ Análisis encolado. Se ejecutará en segundos.\n\nPerfil actual: ' + (json.profile_actual || 'sin datos'));
+                } else {
+                    alert('⚠️ No se pudo encolar el análisis: ' + (json.error || resp.status));
+                }
+            } catch (e) {
+                alert('❌ Error: ' + e.message);
+            }
+        }
+
+        // ── Sección 3: Intentos de impresión ────────────────────────────────────
+        function renderSeccionIntentos(job) {
+            if (!job.intentos || job.intentos.length === 0) {
+                return `
+                    <div class="bg-gray-800 rounded-lg p-5 border border-gray-700">
+                        <h3 class="text-xl font-bold mb-2">🔄 Historial de intentos</h3>
+                        <p class="text-sm text-gray-400 italic">
+                            No hay intentos registrados todavía para este job.<br>
+                            <span class="text-xs">(La grabación detallada de intentos se activa cuando el job pase por el worker de impresión con la nueva lógica instalada).</span>
+                        </p>
+                    </div>
+                `;
+            }
+
+            const filas = job.intentos.map(it => renderIntento(it)).join('');
+            return `
+                <div class="bg-gray-800 rounded-lg p-5 border border-gray-700">
+                    <h3 class="text-xl font-bold mb-3">
+                        🔄 Historial de intentos
+                        <span class="text-sm font-normal text-gray-400">(${job.intentos.length} intento${job.intentos.length > 1 ? 's' : ''})</span>
+                    </h3>
+                    <p class="text-xs text-gray-400 mb-3 italic">
+                        Cada vez que el sistema intenta imprimir el ticket, queda registro independiente.
+                        Click en cada uno para ver el detalle de comandos enviados a la impresora.
+                    </p>
+                    <div class="space-y-3">${filas}</div>
+                </div>
+            `;
+        }
+
+        function renderIntento(it) {
+            const colorOutcome = it.outcome === 'DONE' ? 'border-green-600 bg-green-950' :
+                                 it.outcome === 'FAILED' ? 'border-red-600 bg-red-950' :
+                                 it.outcome === 'WAITING' ? 'border-yellow-600 bg-yellow-950' : 'border-gray-600 bg-gray-950';
+
+            const durInt = it.startedAt && it.endedAt
+                ? formatearMs(new Date(it.endedAt).getTime() - new Date(it.startedAt).getTime())
+                : '-';
+
+            // Métricas técnicas con leyenda humana
+            const metricas = [
+                { label: 'Espera del puerto', val: formatearMs(it.portLockWaitMs), tip: 'Cuánto esperó este intento a que el puerto TCP de la impresora estuviera libre (si otro job estaba imprimiendo)' },
+                { label: 'Conexión TCP', val: formatearMs(it.tcpConnectMs), tip: 'Tiempo en establecer la conexión de red con la impresora' },
+                { label: 'Envío de datos', val: formatearMs(it.dataSendMs), tip: 'Tiempo en mandar los bytes del ticket a la impresora' },
+                { label: 'Bytes enviados', val: (it.payloadBytes || 0) + ' B', tip: 'Cantidad de bytes que componen el ticket' },
+                { label: 'Espera física', val: formatearMs(it.postPrintWaitActualMs || it.postPrintWaitEstimatedMs), tip: 'Tiempo esperado para que la impresora termine físicamente de imprimir (mecánica térmica)' },
+                { label: 'Copias', val: (it.copies || 1), tip: '' }
+            ].map(m => `<div><span class="text-gray-400" title="${escaparHtml(m.tip)}">${m.label}:</span> <span class="font-mono">${escaparHtml(m.val)}</span></div>`).join('');
+
+            // Transcript del intento
+            const transcript = (it.commands && it.commands.length > 0)
+                ? renderTranscript(it.commands)
+                : '<p class="text-xs text-gray-400 italic p-2">Sin registro detallado de comandos para este intento.</p>';
+
+            return `
+                <details class="border ${colorOutcome} rounded p-3">
+                    <summary class="cursor-pointer flex items-center justify-between gap-2 flex-wrap">
+                        <div class="flex items-center gap-3">
+                            <span class="font-bold">Intento #${it.attemptNumber}</span>
+                            ${badgeConfianzaIntento(it)}
+                            ${it.outcome === 'FAILED' && it.failReason ? '<span class="text-xs text-red-300">' + escaparHtml(it.failReason) + '</span>' : ''}
+                        </div>
+                        <div class="text-xs text-gray-400">
+                            ${formatearFechaLocal(it.startedAtLocal)} · Duración: ${durInt}
+                        </div>
+                    </summary>
+                    <div class="mt-3 space-y-3">
+                        <div class="grid grid-cols-2 md:grid-cols-3 gap-2 text-sm bg-gray-900 p-3 rounded">
+                            ${metricas}
+                        </div>
+                        ${it.printerResponsePre || it.printerResponsePost ? `
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+                            <div class="bg-gray-900 p-2 rounded border border-gray-700">
+                                <div class="text-gray-400">🩺 Estado ANTES de imprimir</div>
+                                <div class="font-mono">${escaparHtml(it.printerResponsePre || '-')}</div>
+                                <div class="text-gray-300 italic mt-1">${escaparHtml(it.printerResponsePreLegend || '')}</div>
+                            </div>
+                            <div class="bg-gray-900 p-2 rounded border border-gray-700">
+                                <div class="text-gray-400">🩺 Estado DESPUÉS de imprimir</div>
+                                <div class="font-mono">${escaparHtml(it.printerResponsePost || '-')}</div>
+                                <div class="text-gray-300 italic mt-1">${escaparHtml(it.printerResponsePostLegend || '')}</div>
+                            </div>
+                        </div>` : ''}
+                        ${it.finalDecisionRationale ? `
+                        <div class="bg-gray-900 p-2 rounded border border-gray-700 text-xs">
+                            <span class="text-gray-400">🏁 Por qué se decidió este resultado:</span>
+                            <div class="mt-1">${escaparHtml(it.finalDecisionRationale)}</div>
+                        </div>` : ''}
+                        ${it.exceptionType ? `
+                        <div class="bg-red-950 p-2 rounded border border-red-700 text-xs">
+                            <div class="text-red-300">❌ Excepción: ${escaparHtml(it.exceptionType)}</div>
+                            <div class="text-red-200 mt-1 font-mono">${escaparHtml(it.exceptionMessage || '')}</div>
+                        </div>` : ''}
+                        <div>
+                            <div class="text-sm font-semibold mb-2 flex items-center gap-1">
+                                📜 Transcripción de comandos con la impresora
+                                <span class="text-xs text-gray-400">(${(it.commands || []).length})</span>
+                                <span class="text-gray-500 cursor-help text-xs" title="Cada fila es un comando que el sistema le envió a la impresora o una respuesta que recibió. ➡️ = enviado, ⬅️ = recibido, ⏱️ = la impresora no contestó a tiempo, 💬 = decisión del sistema.">(?)</span>
+                            </div>
+                            ${transcript}
+                        </div>
+                    </div>
+                </details>
+            `;
+        }
+
+        function renderTranscript(comandos) {
+            if (!comandos || comandos.length === 0) return '';
+            const filas = comandos.map(c => {
+                const hex = c.bytesHex ? `<span class="font-mono text-xs">${escaparHtml(c.bytesHex)}</span>` : '<span class="text-gray-500 italic">sin datos</span>';
+                const dur = c.durationMs > 0 ? ('<span class="text-xs text-gray-400">' + c.durationMs + 'ms</span>') : '';
+                return `
+                    <tr class="border-t border-gray-700 hover:bg-gray-800">
+                        <td class="p-1 text-xs text-gray-400">${c.sequenceNum}</td>
+                        <td class="p-1 text-xs">${escaparHtml(c.timestampLocal || '')}</td>
+                        <td class="p-1 text-xs text-gray-400">+${c.offsetMs}ms</td>
+                        <td class="p-1 text-center">${iconoDireccion(c.direction)}</td>
+                        <td class="p-1 text-xs">${escaparHtml(explicarFase(c.phase))}</td>
+                        <td class="p-1 text-xs">${escaparHtml(explicarComando(c.commandName))}</td>
+                        <td class="p-1">${hex}</td>
+                        <td class="p-1 text-xs text-gray-300">${escaparHtml(c.notes || 'ok')} ${dur}</td>
+                    </tr>
+                `;
+            }).join('');
+            return `
+                <div class="overflow-x-auto bg-gray-900 rounded border border-gray-700">
+                    <table class="w-full text-xs">
+                        <thead class="bg-gray-800">
+                            <tr>
+                                <th class="p-1 text-left">#</th>
+                                <th class="p-1 text-left">Hora</th>
+                                <th class="p-1 text-left">Desde inicio</th>
+                                <th class="p-1 text-center">Dir</th>
+                                <th class="p-1 text-left">Fase</th>
+                                <th class="p-1 text-left">Comando</th>
+                                <th class="p-1 text-left">Bytes (hex)</th>
+                                <th class="p-1 text-left">Notas</th>
+                            </tr>
+                        </thead>
+                        <tbody>${filas}</tbody>
+                    </table>
+                </div>
+            `;
+        }
+
+        // ── Sección 4: Contenido del ticket ─────────────────────────────────────
+        function renderSeccionContenido(job) {
+            return `
+                <details class="bg-gray-800 rounded-lg border border-gray-700">
+                    <summary class="cursor-pointer p-5 text-xl font-bold">📄 Contenido del ticket</summary>
+                    <div class="px-5 pb-5">
+                        <pre class="text-xs bg-gray-900 p-3 rounded overflow-x-auto max-h-96 overflow-y-auto border border-gray-700">${escaparHtml(job.contenido || '-')}</pre>
+                    </div>
+                </details>
+            `;
+        }
+
+        // ── Sección Bitmap generado (solo si GuardarBitmapsGenerados=1) ─────────
+        function renderSeccionBitmap(job) {
+            // Placeholder inicial — el contenido real se carga bajo demanda.
+            const idCont = 'bitmap-sec-' + escaparHtml(job.jobId);
+            return `
+                <details class="bg-gray-800 rounded-lg border border-gray-700" ontoggle="cargarBitmapSiCorresponde('${escaparHtml(job.jobId)}', this)">
+                    <summary class="cursor-pointer p-5 text-xl font-bold">
+                        🖼️ Bitmap generado (diagnóstico)
+                        <span class="text-xs font-normal text-gray-400 ml-2">Click para ver imagen + características</span>
+                    </summary>
+                    <div id="${idCont}" class="px-5 pb-5">
+                        <div class="text-sm text-gray-400 italic">Cargando...</div>
+                    </div>
+                </details>
+            `;
+        }
+
+        async function cargarBitmapSiCorresponde(jobId, detailsEl) {
+            if (!detailsEl.open) return;
+            const cont = document.getElementById('bitmap-sec-' + jobId);
+            if (!cont || cont.dataset.loaded) return;
+            try {
+                const resp = await fetch(window.location.origin + '/api/dashboard/job/' + encodeURIComponent(jobId) + '/bitmap-info');
+                if (resp.status === 404) {
+                    cont.innerHTML = `
+                        <div class="p-4 bg-gray-900 rounded border border-gray-700 text-sm text-gray-300">
+                            ⚠️ No hay bitmap guardado para este job.<br>
+                            <span class="text-xs text-gray-400">
+                                Para capturar el bitmap cuando imprimas, activá la configuración
+                                <code class="bg-gray-800 px-1 rounded">GuardarBitmapsGenerados = 1</code>
+                                desde el SQL Console o /api/config y volvé a imprimir.
+                            </span>
+                        </div>`;
+                    cont.dataset.loaded = '1';
+                    return;
+                }
+                const info = await resp.json();
+                if (!resp.ok) {
+                    cont.innerHTML = '<div class="text-red-400 p-3">❌ ' + escaparHtml(info.error || resp.status) + '</div>';
+                    return;
+                }
+
+                // Indicadores de riesgo pensados para el operador.
+                const alertoAlto = info.heightPx > 2500 ? '<span class="ml-2 px-2 py-0.5 rounded text-xs bg-red-700 text-white" title="Bitmaps muy altos saturan el buffer de la impresora (4 KB default) y pueden causar basura o truncamiento.">⚠️ Muy alto</span>' : '';
+                const alertoPayload = info.escposPayloadKb > 30 ? '<span class="ml-2 px-2 py-0.5 rounded text-xs bg-orange-600 text-white" title="Payload ESC/POS grande: más susceptible a corrupción con emulaciones no-Epson.">⚠️ Payload alto</span>' : '';
+                const alertoNegro = info.darkRatioAvgPct > 40 ? '<span class="ml-2 px-2 py-0.5 rounded text-xs bg-yellow-600 text-white" title="Mucha densidad de negro activa throttling térmico, puede cruzar tickets.">⚠️ Mucho negro</span>' : '';
+
+                cont.innerHTML = `
+                    <p class="text-xs text-gray-400 italic mb-3">
+                        Esta es la imagen EXACTA que se renderizó y se intentó enviar a la impresora.
+                        Si la impresora sacó basura o un ticket truncado, compará este preview contra el papel real.
+                    </p>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div class="bg-gray-900 p-3 rounded border border-gray-700">
+                            <div class="text-sm text-gray-400 mb-2">Preview del bitmap (JPG calidad 90)</div>
+                            <div class="bg-white p-2 rounded overflow-auto max-h-96">
+                                <img src="${window.location.origin}${info.imageUrl}" alt="Bitmap del job ${escaparHtml(jobId)}" class="max-w-full mx-auto" />
+                            </div>
+                            <div class="text-xs text-gray-400 mt-2">
+                                <a href="${window.location.origin}${info.imageUrl}" target="_blank" class="text-blue-400 hover:underline">Abrir imagen en tamaño completo ↗</a>
+                            </div>
+                        </div>
+                        <div class="bg-gray-900 p-3 rounded border border-gray-700">
+                            <div class="text-sm text-gray-400 mb-2">Características técnicas</div>
+                            <table class="w-full text-xs">
+                                <tr class="border-b border-gray-800"><td class="py-1 text-gray-400">Renderer</td><td class="py-1 font-mono">${escaparHtml(info.modo || '-')}</td></tr>
+                                <tr class="border-b border-gray-800"><td class="py-1 text-gray-400">Ancho × Alto</td><td class="py-1 font-mono">${info.widthPx} × ${info.heightPx} px ${alertoAlto}</td></tr>
+                                <tr class="border-b border-gray-800"><td class="py-1 text-gray-400" title="Bits por pixel del bitmap GDI original">Formato color</td><td class="py-1 font-mono">${info.bitsPerPixel} bpp</td></tr>
+                                <tr class="border-b border-gray-800"><td class="py-1 text-gray-400">Tamaño JPG</td><td class="py-1 font-mono">${info.fileSizeKb} KB</td></tr>
+                                <tr class="border-b border-gray-800"><td class="py-1 text-gray-400" title="Bytes que se enviaron a la impresora por TCP — depende de la emulación">Payload ESC/POS</td><td class="py-1 font-mono">${info.escposPayloadKb} KB ${alertoPayload}</td></tr>
+                                <tr class="border-b border-gray-800"><td class="py-1 text-gray-400" title="escpos = GS v 0 raster estándar, más compacto. escasterisc = ESC * por bandas, 3× más bytes pero más compatible con clones.">Emulación usada</td><td class="py-1 font-mono">${escaparHtml(info.bitmapEmulacion || '-')}</td></tr>
+                                <tr class="border-b border-gray-800"><td class="py-1 text-gray-400" title="Promedio de pixels oscuros (luma < 128)">Densidad negro avg</td><td class="py-1 font-mono">${info.darkRatioAvgPct}% ${alertoNegro}</td></tr>
+                                <tr class="border-b border-gray-800"><td class="py-1 text-gray-400" title="Fila con mayor densidad (detecta bloques negros masivos)">Densidad negro pico</td><td class="py-1 font-mono">${info.darkRatioMaxRowPct}%</td></tr>
+                                <tr class="border-b border-gray-800"><td class="py-1 text-gray-400">Tiempo impresión estimado</td><td class="py-1 font-mono">${formatearMs(info.estimatedPrintMs)}</td></tr>
+                                <tr class="border-b border-gray-800"><td class="py-1 text-gray-400">Modelo impresora</td><td class="py-1 font-mono">${escaparHtml(info.printerModel || '-')}</td></tr>
+                                <tr><td class="py-1 text-gray-400">IP destino</td><td class="py-1 font-mono">${escaparHtml(info.targetIp || '-')}</td></tr>
+                            </table>
+                        </div>
+                    </div>
+                `;
+                cont.dataset.loaded = '1';
+            } catch (e) {
+                cont.innerHTML = '<div class="text-red-400 p-3">❌ Error cargando bitmap: ' + escaparHtml(e.message) + '</div>';
             }
         }
         
@@ -739,7 +1320,11 @@
                                         <td class="p-2 text-xs">${formatDate(h.fecha)}</td>
                                         <td class="p-2">${h.duracionMs ? h.duracionMs + 'ms' : '-'}</td>
                                         <td class="p-2">
-                                            <button onclick="deleteJob('${h.jobId}')" 
+                                            <button onclick="reintentarImpresion('${h.jobId}')"
+                                                class="px-2 py-1 bg-blue-600 hover:bg-blue-700 rounded text-xs mr-1" title="Reintentar impresión (reenvía el mismo job a la impresora)">
+                                                🔄
+                                            </button>
+                                            <button onclick="deleteJob('${h.jobId}')"
                                                 class="px-2 py-1 bg-red-600 hover:bg-red-700 rounded text-xs" title="Eliminar job">
                                                 🗑️
                                             </button>
@@ -1333,6 +1918,18 @@
         initChart();
         setupRefreshToggle();
         fetchDashboardData();
+        // ─── Reset Impresora ───
+        async function resetPrinter(id, nombre) {
+            if (!confirm('Enviar comando ESC @ reset a ' + nombre + '?')) return;
+            try {
+                const res = await fetch(window.location.origin + '/api/printer/reset/' + id, { method: 'POST' });
+                const data = await res.json();
+                if (data.error) { alert('Error: ' + data.error); return; }
+                alert('Reset enviado a ' + nombre + '\nRespuesta: ' + (data.response || 'sin respuesta'));
+                setTimeout(() => manualRefreshAll(), 2000);
+            } catch (err) { alert('Error: ' + err.message); }
+        }
+
         // ─── Dispositivos en la Red ───
         async function loadNetworkDevices() {
             try {
@@ -1416,6 +2013,240 @@
         loadNetworkHistory(1);
         loadNetworkDevices();
         // No auto-refresh por defecto (modo manual activo)
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // Buscador de impresoras multi-protocolo
+        // ═══════════════════════════════════════════════════════════════════════
+        let _discoveryPollingTimer = null;
+        let _discoverySessionId = null;
+
+        // Abre el modal y arranca una nueva búsqueda.
+        async function abrirBuscadorImpresoras() {
+            const modal = document.getElementById('discovery-modal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            document.getElementById('discovery-content').innerHTML = '<div class="text-center p-6 text-gray-400">⏳ Iniciando búsqueda...</div>';
+
+            try {
+                const resp = await fetch(window.location.origin + '/api/dashboard/discovery/start', { method: 'POST' });
+                const json = await resp.json();
+                if (!resp.ok) throw new Error(json.error || resp.status);
+                _discoverySessionId = json.sessionId;
+                iniciarPollingDescubrimiento();
+            } catch (e) {
+                document.getElementById('discovery-content').innerHTML = '<div class="text-red-400 p-4">❌ Error iniciando búsqueda: ' + escaparHtml(e.message) + '</div>';
+            }
+        }
+
+        function cerrarBuscadorImpresoras() {
+            detenerPollingDescubrimiento();
+            const modal = document.getElementById('discovery-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        }
+
+        function detenerPollingDescubrimiento() {
+            if (_discoveryPollingTimer) {
+                clearTimeout(_discoveryPollingTimer);
+                _discoveryPollingTimer = null;
+            }
+        }
+
+        function iniciarPollingDescubrimiento() {
+            detenerPollingDescubrimiento();
+            pollearEstado();
+        }
+
+        async function pollearEstado() {
+            if (!_discoverySessionId) return;
+            try {
+                const resp = await fetch(window.location.origin + '/api/dashboard/discovery/status/' + _discoverySessionId);
+                const data = await resp.json();
+                if (!resp.ok) {
+                    document.getElementById('discovery-content').innerHTML = '<div class="text-red-400 p-4">❌ ' + escaparHtml(data.error || resp.status) + '</div>';
+                    return;
+                }
+                renderizarEstadoDescubrimiento(data);
+                if (data.estado === 'running') {
+                    _discoveryPollingTimer = setTimeout(pollearEstado, 800);
+                } else {
+                    detenerPollingDescubrimiento();
+                }
+            } catch (e) {
+                document.getElementById('discovery-content').innerHTML = '<div class="text-red-400 p-4">❌ Error consultando estado: ' + escaparHtml(e.message) + '</div>';
+                detenerPollingDescubrimiento();
+            }
+        }
+
+        function renderizarEstadoDescubrimiento(data) {
+            const cont = document.getElementById('discovery-content');
+            // Barra de progreso global: proporción de protocolos completados.
+            const total = data.protocolos.length;
+            const terminados = data.protocolos.filter(p => p.estado === 'completed' || p.estado === 'error' || p.estado === 'cancelled').length;
+            const porcentaje = total > 0 ? Math.round((terminados / total) * 100) : 0;
+
+            const barraEstado = data.estado === 'running'
+                ? '<span class="inline-block px-2 py-0.5 rounded text-xs bg-blue-600 text-white animate-pulse">🔄 Buscando...</span>'
+                : data.estado === 'completed'
+                ? '<span class="inline-block px-2 py-0.5 rounded text-xs bg-green-700 text-white">✓ Búsqueda completada</span>'
+                : data.estado === 'cancelled'
+                ? '<span class="inline-block px-2 py-0.5 rounded text-xs bg-yellow-600 text-white">⏹ Cancelada</span>'
+                : '<span class="inline-block px-2 py-0.5 rounded text-xs bg-red-700 text-white">❌ Error</span>';
+
+            // Protocolos con íconos por estado
+            const filasProto = data.protocolos.map(p => {
+                const icono = p.estado === 'pending' ? '⏳'
+                    : p.estado === 'running' ? '<span class="inline-block animate-spin">🔄</span>'
+                    : p.estado === 'completed' ? '✅'
+                    : p.estado === 'error' ? '❌' : '⏹';
+                const badge = p.estado === 'running'
+                    ? '<span class="text-xs text-blue-300">buscando...</span>'
+                    : p.estado === 'completed'
+                    ? '<span class="text-xs text-gray-300">' + (p.duracionMs || 0) + 'ms · ' + (p.encontradas || 0) + ' impresora(s)</span>'
+                    : p.estado === 'error'
+                    ? '<span class="text-xs text-red-400">' + escaparHtml(p.error || 'error') + '</span>'
+                    : '<span class="text-xs text-gray-500">' + p.estado + '</span>';
+                return `
+                    <div class="flex items-center gap-3 p-2 bg-gray-900 rounded">
+                        <span class="text-lg w-6 text-center">${icono}</span>
+                        <span class="flex-1 font-semibold">${escaparHtml(p.nombre)}</span>
+                        ${badge}
+                    </div>
+                `;
+            }).join('');
+
+            // Tabla de resultados
+            let htmlResultados;
+            if (!data.resultados || data.resultados.length === 0) {
+                htmlResultados = data.estado === 'running'
+                    ? '<p class="text-gray-400 italic text-center p-6">Todavía no se encontraron impresoras. Esperando respuestas...</p>'
+                    : '<p class="text-gray-400 italic text-center p-6">No se encontraron impresoras en la red por ninguno de los protocolos.</p>';
+            } else {
+                htmlResultados = `
+                    <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                        <thead class="bg-gray-900">
+                            <tr>
+                                <th class="p-2 text-left">Fabricante</th>
+                                <th class="p-2 text-left">Modelo / Hostname</th>
+                                <th class="p-2 text-left">IP</th>
+                                <th class="p-2 text-left">MAC</th>
+                                <th class="p-2 text-left">Detectada por</th>
+                                <th class="p-2 text-left">Acción</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${data.resultados.map(r => renderFilaResultado(r)).join('')}
+                        </tbody>
+                    </table>
+                    </div>
+                `;
+            }
+
+            cont.innerHTML = `
+                <div class="mb-4 flex items-center gap-3 flex-wrap">
+                    ${barraEstado}
+                    <span class="text-sm text-gray-300">${terminados}/${total} protocolos terminados</span>
+                    <span class="text-sm text-gray-400">·</span>
+                    <span class="text-sm text-gray-300">${data.totalEncontradas || 0} impresora(s) única(s)</span>
+                    ${data.duracionTotalMs > 0 ? '<span class="text-xs text-gray-400">· Total: ' + data.duracionTotalMs + 'ms</span>' : ''}
+                </div>
+                <div class="w-full bg-gray-900 rounded h-3 mb-5 overflow-hidden">
+                    <div class="h-full bg-gradient-to-r from-blue-500 to-purple-600 transition-all" style="width: ${porcentaje}%"></div>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-2 mb-5">
+                    ${filasProto}
+                </div>
+                <h3 class="text-lg font-semibold mb-2">📋 Impresoras encontradas</h3>
+                ${htmlResultados}
+            `;
+        }
+
+        function renderFilaResultado(r) {
+            const vendorColor = r.vendor === 'Epson' ? 'text-green-400'
+                : r.vendor === 'Star' ? 'text-yellow-300'
+                : r.vendor === 'Bixolon' ? 'text-orange-300'
+                : r.vendor === 'HP' || r.vendor === 'Brother' || r.vendor === 'Canon' ? 'text-blue-300'
+                : r.vendor && r.vendor.startsWith('Clone') ? 'text-gray-300'
+                : 'text-gray-500';
+
+            const iconoVendor = r.vendor === 'Epson' ? '🎯'
+                : r.vendor === 'Star' || r.vendor === 'Bixolon' ? '🖨️'
+                : r.vendor && r.vendor.startsWith('Clone') ? '🔧'
+                : '🖨️';
+
+            const protos = (r.descubiertaPor || []).map(m => {
+                const et = m === 'enpc' ? '<span class="bg-green-800 text-green-200 px-1 rounded text-xs" title="Protocolo propietario Epson">ENPC</span>'
+                    : m === 'mdns' ? '<span class="bg-blue-800 text-blue-200 px-1 rounded text-xs" title="Bonjour/Zeroconf multicast">mDNS</span>'
+                    : m === 'snmp' ? '<span class="bg-purple-800 text-purple-200 px-1 rounded text-xs" title="Simple Network Management Protocol">SNMP</span>'
+                    : m === 'arp+tcp9100' ? '<span class="bg-gray-700 text-gray-200 px-1 rounded text-xs" title="Barrido de subnet + conexión a puerto 9100 ESC/POS">TCP 9100</span>'
+                    : '<span class="bg-gray-700 px-1 rounded text-xs">' + escaparHtml(m) + '</span>';
+                return et;
+            }).join(' ');
+
+            const ipTxt = r.tieneIp
+                ? '<span class="font-mono">' + escaparHtml(r.ip) + '</span>'
+                : '<span class="text-yellow-400 text-xs italic" title="La impresora no tiene IP configurada. Podrás asignársela desde EpsonNet Config o configurándola en la impresora.">Sin IP asignada</span>';
+
+            const modeloHost = [r.modelo, r.hostname].filter(x => !!x).join(' · ');
+
+            let accion;
+            if (r.yaAgregadaComoId) {
+                accion = `<span class="inline-block px-3 py-1 bg-green-900 text-green-200 rounded text-xs" title="Esta impresora ya está registrada en el sistema">✅ YA AGREGADA como <strong>${escaparHtml(r.yaAgregadaComoNombre || r.yaAgregadaComoId)}</strong></span>`;
+            } else if (!r.tieneIp) {
+                accion = `<button disabled class="px-3 py-1 bg-gray-600 rounded text-xs cursor-not-allowed" title="Primero configurale una IP a la impresora (por ejemplo con EpsonNet Config).">➕ Requiere IP</button>`;
+            } else {
+                // Botón "Agregar" que abre mini-form de nombre
+                accion = `<button onclick='agregarImpresoraDescubierta(${JSON.stringify(r).replace(/'/g, "&#39;")})' class="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-xs">➕ Agregar</button>`;
+            }
+
+            return `
+                <tr class="border-t border-gray-700">
+                    <td class="p-2 ${vendorColor}">${iconoVendor} ${escaparHtml(r.vendor || 'Desconocido')}</td>
+                    <td class="p-2 text-xs">${escaparHtml(modeloHost || '-')}</td>
+                    <td class="p-2">${ipTxt}</td>
+                    <td class="p-2 font-mono text-xs">${escaparHtml(r.macFormateada || r.macNormalizada || '-')}</td>
+                    <td class="p-2 text-xs">${protos}</td>
+                    <td class="p-2">${accion}</td>
+                </tr>
+            `;
+        }
+
+        // Abre un prompt chiquito para nombrar la impresora y la agrega al sistema.
+        async function agregarImpresoraDescubierta(imp) {
+            let sugerido = imp.hostname || imp.modelo || (imp.vendor ? imp.vendor + '_' + (imp.macNormalizada || '').substring(0, 4) : 'PRINTER_NEW');
+            const nombre = prompt('Nombre visible para esta impresora:\n(Ej: "COCINA_01", "BARRA_SUSHI")', sugerido);
+            if (!nombre) return;
+
+            try {
+                const body = {
+                    macNormalizada: imp.macNormalizada,
+                    ip: imp.ip,
+                    nombre: nombre,
+                    modelo: imp.modelo,
+                    vendor: imp.vendor,
+                    puerto: 9100
+                };
+                const resp = await fetch(window.location.origin + '/api/dashboard/discovery/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const json = await resp.json();
+                if (resp.status === 409) {
+                    alert('⚠️ Esta impresora ya estaba registrada como: ' + (json.nombre || json.impresoraId));
+                } else if (!resp.ok) {
+                    alert('❌ Error: ' + (json.error || resp.status));
+                } else {
+                    alert('✅ Impresora agregada: ' + json.nombre + ' (' + json.impresoraId + ')');
+                    // Refrescar el estado del modal para que marque "YA AGREGADA" y el listado de abajo.
+                    pollearEstado();
+                    fetchDashboardData();
+                }
+            } catch (e) {
+                alert('❌ Error: ' + e.message);
+            }
+        }
     </script>
 </body>
 </html>

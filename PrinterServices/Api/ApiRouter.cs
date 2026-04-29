@@ -9,6 +9,7 @@ using PrinterServices.Api.Controllers;
 using PrinterServices.Config;
 using PrinterServices.Data;
 using PrinterServices.Queue;
+using PrinterServices.Services.Printers;
 
 
 namespace PrinterServices.Api
@@ -60,14 +61,32 @@ namespace PrinterServices.Api
         private readonly DashboardController _dashboardController;
         private readonly NetworkController _networkController;
 
+        // Constructor original (compatibilidad).
         public ApiRouter(PrinterServiceDb db, PrintJobManager jobManager, ConfigManager configManager)
+            : this(db, jobManager, configManager, null, null, null) { }
+
+        // Constructor con ProbeScheduler (compatibilidad intermedia).
+        public ApiRouter(PrinterServiceDb db, PrintJobManager jobManager, ConfigManager configManager, ProbeScheduler probeScheduler)
+            : this(db, jobManager, configManager, probeScheduler, null, null) { }
+
+        // Constructor con ProbeScheduler + DbMaintenanceWorker.
+        public ApiRouter(PrinterServiceDb db, PrintJobManager jobManager, ConfigManager configManager,
+            ProbeScheduler probeScheduler, PrinterServices.Workers.DbMaintenanceWorker dbMaintenanceWorker)
+            : this(db, jobManager, configManager, probeScheduler, dbMaintenanceWorker, null) { }
+
+        // Constructor completo: recibe también el PrinterDiscoveryService para el
+        // buscador de impresoras multi-protocolo del dashboard.
+        public ApiRouter(PrinterServiceDb db, PrintJobManager jobManager, ConfigManager configManager,
+            ProbeScheduler probeScheduler,
+            PrinterServices.Workers.DbMaintenanceWorker dbMaintenanceWorker,
+            PrinterServices.Services.Discovery.PrinterDiscoveryService discoveryService)
         {
             _healthController = new HealthController(db);
             _printController = new PrintController(jobManager);
             _jobController = new JobController(jobManager);
-            _printerController = new PrinterController(db);
+            _printerController = new PrinterController(db, probeScheduler);
             _configController = new ConfigController(configManager);
-            _dashboardController = new DashboardController(db, jobManager, configManager, DateTime.Now);
+            _dashboardController = new DashboardController(db, jobManager, configManager, DateTime.Now, dbMaintenanceWorker, discoveryService);
             _networkController = new NetworkController();
         }
 
@@ -131,6 +150,24 @@ namespace PrinterServices.Api
             {
                 string body = await ReadBodyAsync(request); // Leer body JSON del request
                 return _printerController.SyncPrinters(body); // Llamar a método de sincronización
+            }
+            // POST /api/printers/{id}/probe-capabilities — fuerza probe manual de capacidades ESC/POS.
+            // Devuelve 503 si el probe no fue habilitado en este servicio.
+            if (method == "POST" && path.StartsWith("/api/printers/") && path.EndsWith("/probe-capabilities"))
+            {
+                string segmento = path.Substring("/api/printers/".Length);
+                string id = segmento.Substring(0, segmento.Length - "/probe-capabilities".Length);
+                return _printerController.ProbeCapabilities(id);
+            }
+            // GET /api/printers/{id}/probe-log — devuelve el transcript del último probe
+            // de capacidades (comandos enviados + respuestas + decisiones), ordenado
+            // cronológicamente. Usado por el modal del dashboard para mostrar qué pasó
+            // durante el análisis de la impresora.
+            if (method == "GET" && path.StartsWith("/api/printers/") && path.EndsWith("/probe-log"))
+            {
+                string segmento = path.Substring("/api/printers/".Length);
+                string id = segmento.Substring(0, segmento.Length - "/probe-log".Length);
+                return _printerController.ProbeLog(id);
             }
             // ── USB Discovery: Enumerar impresoras USB conectadas ──
             if (method == "GET" && path == "/api/printer/usb/discover")
@@ -234,6 +271,13 @@ namespace PrinterServices.Api
                 return _configController.ResetAll();
             }
 
+            // ── Reset impresora remoto ──
+            if (method == "POST" && path.StartsWith("/api/printer/reset/"))
+            {
+                string impresoraId = path.Substring("/api/printer/reset/".Length);
+                return _printerController.ResetPrinter(impresoraId);
+            }
+
             // ── Dashboard (Fase 8) ──
             // RAZÓN: Rutas especiales retornan null → HttpApiServer delega a HandleSpecialRoute
             // porque necesitan acceso directo a HttpListenerContext (HTML, paginación, etc.)
@@ -274,6 +318,13 @@ namespace PrinterServices.Api
             if (method == "GET" && path == "/api/dashboard/update-status") { return null; }
             if (method == "GET" && path == "/api/dashboard/quipunet-health") { return null; }
             if (method == "GET" && path == "/api/dashboard/quipunet-screenshot") { return null; }
+            // Mantenimiento de BD: info (tamaño, top tablas, última purga) y disparar purga manual (solo localhost)
+            if (method == "GET" && path == "/api/dashboard/db-maintenance/info") { return null; }
+            if (method == "POST" && path == "/api/dashboard/db-maintenance/run") { return null; }
+            // Descubrimiento multi-protocolo de impresoras
+            if (method == "POST" && path == "/api/dashboard/discovery/start") { return null; }
+            if (method == "GET" && path.StartsWith("/api/dashboard/discovery/status/")) { return null; }
+            if (method == "POST" && path == "/api/dashboard/discovery/add") { return null; }
 
             // ── Printer IP Reset (cross-subnet) ──
             if (method == "GET" && path == "/api/printer/resetip")
@@ -313,6 +364,24 @@ namespace PrinterServices.Api
             if (method == "GET" && path == "/api/dashboard/data")
             {
                 _dashboardController.HandleDashboardData(ctx);
+                return;
+            }
+
+            // ── Dashboard: Bitmap guardado de un job (JPG) ──
+            // IMPORTANTE: va ANTES del handler genérico de /api/dashboard/job/ para
+            // que no se lo trague como un jobId con suffix raro.
+            if (method == "GET" && path.StartsWith("/api/dashboard/job/") && path.EndsWith("/bitmap-info"))
+            {
+                string seg = originalPath.Substring("/api/dashboard/job/".Length);
+                string jobId = seg.Substring(0, seg.Length - "/bitmap-info".Length);
+                _dashboardController.HandleJobBitmapInfo(ctx, jobId);
+                return;
+            }
+            if (method == "GET" && path.StartsWith("/api/dashboard/job/") && path.EndsWith("/bitmap"))
+            {
+                string seg = originalPath.Substring("/api/dashboard/job/".Length);
+                string jobId = seg.Substring(0, seg.Length - "/bitmap".Length);
+                _dashboardController.HandleJobBitmapJpeg(ctx, jobId);
                 return;
             }
 
@@ -421,6 +490,18 @@ namespace PrinterServices.Api
             if (method == "GET" && path == "/api/dashboard/update-status") { _dashboardController.HandleUpdateStatus(ctx); return; }
             if (method == "GET" && path == "/api/dashboard/quipunet-health") { _dashboardController.HandleQuipuNetHealth(ctx); return; }
             if (method == "GET" && path == "/api/dashboard/quipunet-screenshot") { _dashboardController.HandleQuipuNetScreenshot(ctx); return; }
+            // Mantenimiento de BD: info (tamaño, top tablas, última purga) y purga manual (solo localhost)
+            if (method == "GET" && path == "/api/dashboard/db-maintenance/info") { _dashboardController.HandleDbMaintenanceInfo(ctx); return; }
+            if (method == "POST" && path == "/api/dashboard/db-maintenance/run") { _dashboardController.HandleDbMaintenanceRun(ctx); return; }
+            // Discovery multi-protocolo
+            if (method == "POST" && path == "/api/dashboard/discovery/start") { _dashboardController.HandleDiscoveryStart(ctx); return; }
+            if (method == "GET" && path.StartsWith("/api/dashboard/discovery/status/"))
+            {
+                string id = originalPath.Substring("/api/dashboard/discovery/status/".Length);
+                _dashboardController.HandleDiscoveryStatus(ctx, id);
+                return;
+            }
+            if (method == "POST" && path == "/api/dashboard/discovery/add") { _dashboardController.HandleDiscoveryAdd(ctx); return; }
 
             // Si llegamos aquí, no es ruta especial
             ctx.Response.StatusCode = 404;

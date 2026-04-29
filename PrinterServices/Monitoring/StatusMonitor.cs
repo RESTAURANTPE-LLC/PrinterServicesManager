@@ -55,6 +55,12 @@ namespace PrinterServices.Monitoring
         // RAZÓN: Al expirar un job, se envía callback HTTP a QuipuNetX (además de gRPC)
         private readonly JobStatusCallbackNotifier _callbackNotifier;
 
+        // Scheduler de probes de capacidades ESC/POS. Opcional (puede ser null si no se
+        // inyectó). Cuando está presente, el StatusMonitor ejecuta probes piggyback en
+        // su tick para detectar GS ( H fn=48, ASB y firmware por impresora. Así el
+        // PrintWorker sabe qué método de confirmación usar y evita falsos positivos.
+        private readonly ProbeScheduler _probeScheduler;
+
         // Token de cancelación para detener ciclo de monitoreo
         // RAZÓN: Permite shutdown limpio del servicio
         private readonly CancellationTokenSource _cts;
@@ -70,13 +76,14 @@ namespace PrinterServices.Monitoring
         /// BENEFICIO: Permite testing con mocks, cambiar implementaciones sin modificar StatusMonitor.
         /// </summary>
         public StatusMonitor(
-            PrinterServiceDb db, 
-            PrintJobManager jobManager, 
+            PrinterServiceDb db,
+            PrintJobManager jobManager,
             ArpScanWorker arpWorker,
             IPrinterMacEnricher macEnricher,
             IPhysicalDeviceGrouper deviceGrouper,
             IPrinterStateSync stateSync,
-            JobStatusCallbackNotifier callbackNotifier = null) // Fase 23: Notificador de callbacks (opcional para compatibilidad)
+            JobStatusCallbackNotifier callbackNotifier = null, // Fase 23: Notificador de callbacks (opcional para compatibilidad)
+            ProbeScheduler probeScheduler = null)              // Scheduler de probes de capacidades (opcional)
         {
             // Validar dependencias inyectadas no nulas
             // RAZÓN: Fail-fast si no se configuró correctamente
@@ -87,7 +94,8 @@ namespace PrinterServices.Monitoring
             _deviceGrouper = deviceGrouper ?? throw new ArgumentNullException(nameof(deviceGrouper));
             _stateSync = stateSync ?? throw new ArgumentNullException(nameof(stateSync));
             _callbackNotifier = callbackNotifier; // Fase 23: Puede ser null si no se configuró
-            
+            _probeScheduler = probeScheduler;     // Puede ser null (probe de capacidades deshabilitado)
+
             // Crear token de cancelación
             // RAZÓN: Para poder detener el loop de monitoreo limpiamente
             _cts = new CancellationTokenSource();
@@ -252,84 +260,105 @@ namespace PrinterServices.Monitoring
                 uniqueDevices.Count, printers.Count);
 
             // ═══════════════════════════════════════════════════════════════════════════════
-            // PASO 4: VERIFICAR ESTADO DE CADA DISPOSITIVO FÍSICO ÚNICO
+            // PASO 4: VERIFICAR ESTADO EN PARALELO + PROCESAR TRANSICIONES SECUENCIALMENTE
             // ═══════════════════════════════════════════════════════════════════════════════
-            
-            // Iterar solo sobre dispositivos ÚNICOS (representantes de cada grupo)
-            // RAZÓN: Evitar verificar BARRA y BARRA 2 (misma MAC) dos veces
+
+            // RAZÓN: TCP connect puede tardar hasta 1-3s por impresora (timeout).
+            // Con 10 impresoras secuenciales → 10-30s de ciclo. En paralelo → 1-3s total.
+            // Solo la verificacion TCP/DLE corre en paralelo. Las transiciones, notificaciones
+            // y updates de BD siguen secuenciales (thread-safe, sin cambios en la logica).
+
+            int checkTimeoutMs = ConfigManager.Instance.GetInt("StatusCheckConnectTimeoutMs", 1000);
+
+            // Lanzar TODOS los checks TCP en paralelo
+            var checkTasks = new Dictionary<string, Task<PrinterStatus>>();
             foreach (var kvp in uniqueDevices)
             {
-                // Extraer impresora representante del diccionario
-                // RAZÓN: kvp.Value es el dispositivo físico seleccionado para verificación
+                if (ct.IsCancellationRequested) break;
                 PrinterEntity printer = kvp.Value;
+                bool isUsb = printer.TipoConexion == "USB" && !string.IsNullOrEmpty(printer.UsbUniqueKey);
 
-                // Si cancelación solicitada, abortar verificación
-                // RAZÓN: Shutdown del servicio debe ser inmediato
+                // Filtrar IPs invalidas (puerto concatenado)
+                if (!isUsb && !string.IsNullOrEmpty(printer.Ip) && printer.Ip.Contains(":"))
+                {
+                    Log.DebugFormat("[MONITOR] {0} — IP invalida '{1}', omitiendo", printer.Nombre ?? printer.ImpresoraId, printer.Ip);
+                    continue;
+                }
+
+                if (isUsb)
+                {
+                    var usbKey = printer.UsbUniqueKey;
+                    checkTasks[kvp.Key] = Task.Run(() => UsbPrinterStatusChecker.CheckSync(usbKey, checkTimeoutMs));
+                }
+                else if (!string.IsNullOrEmpty(printer.Ip))
+                {
+                    var ip = printer.Ip;
+                    var port = printer.Puerto;
+                    // Si la impresora NO soporta DLE EOT (se bloquea), solo verificar TCP connect
+                    // SupportsDleEot: 1=soporta (default), 0=no soporta (se bloqueó antes)
+                    bool useDle = printer.SupportsDleEot != 0;
+                    if (useDle)
+                    {
+                        checkTasks[kvp.Key] = Task.Run(() => PrinterStatusChecker.CheckSync(ip, port, checkTimeoutMs));
+                    }
+                    else
+                    {
+                        checkTasks[kvp.Key] = Task.Run(() => PrinterStatusChecker.CheckTcpOnly(ip, port, checkTimeoutMs));
+                    }
+                }
+            }
+
+            // Esperar que TODOS terminen (el mas lento define el tiempo total, no la suma)
+            try { await Task.WhenAll(checkTasks.Values); }
+            catch { /* Excepciones individuales se manejan abajo */ }
+
+            // Procesar resultados y transiciones secuencialmente (logica existente intacta)
+            foreach (var kvp in uniqueDevices)
+            {
+                PrinterEntity printer = kvp.Value;
                 if (ct.IsCancellationRequested) break;
 
-                // Guardar estado anterior para detectar TRANSICIONES
-                // RAZÓN: Solo notificar cuando hay CAMBIOS (OFFLINE→ONLINE, etc.)
+                // Si no se lanzo check para esta impresora, skip
+                if (!checkTasks.ContainsKey(kvp.Key)) continue;
+
                 bool wasOnline = printer.EstadoOnline == 1;
                 bool wasDisponible = printer.DisponibleParaImprimir == 1;
 
                 try
                 {
                     // ═══════════════════════════════════════════════════════════════════════════════
-                    // ESTRATEGIA INTELIGENTE: DLE EOT primero → Auto-detección SNMP → Optimización
-                    // Para USB: UsbPrinterStatusChecker (SetupAPI + DLE EOT vía USB)
+                    // OBTENER RESULTADO DEL CHECK PARALELO
                     // ═══════════════════════════════════════════════════════════════════════════════
 
-                    int checkTimeoutMs = ConfigManager.Instance.GetInt("TcpConnectTimeoutMs", 3000);
+                    // Obtener resultado del check paralelo (ya completado por Task.WhenAll)
                     PrinterStatus dleStatus;
                     bool isUsbPrinter = printer.TipoConexion == "USB"
                         && !string.IsNullOrEmpty(printer.UsbUniqueKey);
 
-                    if (isUsbPrinter)
+                    var checkTask = checkTasks[kvp.Key];
+                    if (checkTask.IsFaulted)
                     {
-                        // ═══════════════════════════════════════════════════════════
-                        // IMPRESORA USB: verificar por UsbUniqueKey (VID+PID+Serial)
-                        // ═══════════════════════════════════════════════════════════
-                        dleStatus = await UsbPrinterStatusChecker.CheckAsync(
-                            printer.UsbUniqueKey, checkTimeoutMs, ct);
-
-                        // Detectar si el DevicePath cambió (usuario movió de puerto USB)
-                        // Usa el DevicePath ya resuelto por UsbPrinterStatusChecker (sin re-enumerar)
-                        if (dleStatus.Online && !string.IsNullOrEmpty(dleStatus.ResolvedUsbDevicePath)
-                            && dleStatus.ResolvedUsbDevicePath != printer.UsbDevicePath)
-                        {
-                            Log.InfoFormat("[MONITOR] Impresora USB {0} cambió de puerto: {1} → {2}",
-                                printer.Nombre ?? printer.ImpresoraId,
-                                printer.UsbDevicePath ?? "(inicial)", dleStatus.ResolvedUsbDevicePath);
-                            printer.UsbDevicePath = dleStatus.ResolvedUsbDevicePath;
-                            // Se persiste más abajo con _db.Update(printer)
-                        }
+                        // El check lanzo excepcion — marcar offline
+                        dleStatus = PrinterStatus.Offline(checkTask.Exception?.InnerException?.Message ?? "Error desconocido");
                     }
                     else
                     {
-                        // ═══════════════════════════════════════════════════════════
-                        // IMPRESORA RED: verificar por IP (comportamiento existente)
-                        // ═══════════════════════════════════════════════════════════
-                        // PORT LOCK: intentar adquirir el lock de la IP de esta impresora.
-                        // Si PrintWorker está imprimiendo ahora mismo, se skippea el check
-                        // de este ciclo — el próximo ciclo (en StatusCheckIntervalSeconds)
-                        // volverá a intentar. Evita colisionar con el bitmap en curso.
-                        int portLockTimeoutMs = ConfigManager.Instance.GetInt("StatusCheckPortLockTimeoutMs", 1500);
-                        var portLock = await Core.Network.PrinterPortLock.TryAcquireAsync(
-                            printer.Ip, portLockTimeoutMs, ct);
-                        if (portLock == null)
+                        dleStatus = checkTask.Result;
+                    }
+
+                    // USB: detectar cambio de DevicePath
+                    if (isUsbPrinter && dleStatus.Online && !string.IsNullOrEmpty(dleStatus.ResolvedUsbDevicePath)
+                        && dleStatus.ResolvedUsbDevicePath != printer.UsbDevicePath)
+                    {
+                        printer.UsbDevicePath = dleStatus.ResolvedUsbDevicePath;
+                    }
+
+                    // Probe de capacidades (solo RED, solo si online, solo si no hay jobs)
+                    if (!isUsbPrinter && dleStatus.Online && _probeScheduler != null && DebeProbarImpresora(printer))
+                    {
+                        if (!_jobManager.TieneJobsEnColaOImprimiendo(printer.ImpresoraId))
                         {
-                            Log.DebugFormat("[MONITOR] {0} ({1}) — port lock ocupado (print en curso), check salteado este ciclo",
-                                printer.Nombre ?? printer.ImpresoraId, printer.Ip);
-                            continue; // Próxima iteración del foreach de impresoras
-                        }
-                        try
-                        {
-                            dleStatus = await PrinterStatusChecker.CheckAsync(
-                                printer.Ip, printer.Puerto, checkTimeoutMs, ct);
-                        }
-                        finally
-                        {
-                            portLock.Dispose();
+                            try { await EjecutarProbeAsync(printer, dleStatus, ct); } catch { }
                         }
                     }
 
@@ -408,9 +437,22 @@ namespace PrinterServices.Monitoring
                                 // status ya tiene resultado DLE EOT
                             }
                             
-                            // Persistir resultado de auto-detección en BD
-                            // RAZÓN: Próximos ciclos consultarán SnmpEnabled para optimizar
-                            _db.Update(printer);
+                            // Persistir resultado de auto-detección SNMP en BD con UPDATE SELECTIVO.
+                            // RAZÓN: igual que arriba — no reescribir toda la fila para no colisionar
+                            // con UNIQUE index de mac_address cuando hay duplicados en distintos formatos.
+                            try
+                            {
+                                _db.Execute(
+                                    "UPDATE printers SET snmp_enabled = ?, snmp_community = ? WHERE impresora_id = ?",
+                                    printer.SnmpEnabled,
+                                    printer.SnmpCommunity,
+                                    printer.ImpresoraId);
+                            }
+                            catch (Exception exSnmp)
+                            {
+                                Log.DebugFormat("[MONITOR] UPDATE selectivo SNMP falló para {0}: {1}",
+                                    printer.ImpresoraId, exSnmp.Message);
+                            }
                         }
                         // CASO B: Ya confirmado que tiene SNMP (SnmpEnabled=1) → Usar SNMP directamente
                         // RAZÓN: Auto-detección previa fue exitosa, usar método optimizado
@@ -464,9 +506,53 @@ namespace PrinterServices.Monitoring
                     printer.TapaAbierta = status.TapaAbierta ? 1 : 0;
                     printer.UltimoCheck = DateTime.Now.ToString("o");
 
-                    // Persistir estado actualizado en BD
-                    // RAZÓN: PrintWorker consulta estos campos antes de imprimir
-                    _db.Update(printer);
+                    // AUTO-DETECT: Si DLE EOT retornó todo cero (TCP_OK_NO_DLE), marcar
+                    // SupportsDleEot=0 para que en el siguiente ciclo use CheckTcpOnly.
+                    // Esto evita que impresoras chinas (E3NSTART RPT008) se bloqueen
+                    // por recibir DLE EOT repetidamente cada 2 segundos.
+                    if (status.RawStatus != null && status.RawStatus.Contains("TCP_OK_NO_DLE")
+                        && printer.SupportsDleEot != 0)
+                    {
+                        printer.SupportsDleEot = 0;
+                        Log.WarnFormat("[MONITOR] {0} ({1}) → DLE EOT no soportado, cambiando a TCP-only para evitar bloqueo",
+                            printer.Nombre ?? printer.ImpresoraId, printer.Ip);
+                        try
+                        {
+                            _db.Execute("UPDATE printers SET supports_dle_eot = 0 WHERE impresora_id = ?", printer.ImpresoraId);
+                        }
+                        catch { }
+                    }
+
+                    // Persistir estado actualizado en BD con UPDATE SELECTIVO.
+                    // RAZÓN: un _db.Update(printer) reescribe TODA la fila, incluyendo mac_address.
+                    // Si hay dos filas con la misma MAC en distintos formatos (ej: "50579C089E6F"
+                    // y "50:57:9C:08:9E:6F"), el UNIQUE index las deja convivir como strings
+                    // distintos — pero el rewrite dispara UNIQUE constraint failed. Al acotar
+                    // el UPDATE a los campos de estado evitamos ese conflicto y, de paso, no
+                    // pisamos mac_address que es responsabilidad exclusiva del MacEnricher.
+                    // Documentado en vibe_engeneering_print_robustness.md §2.2.
+                    try
+                    {
+                        _db.Execute(
+                            "UPDATE printers SET " +
+                            "estado_online = ?, " +
+                            "disponible_para_imprimir = ?, " +
+                            "tiene_papel = ?, " +
+                            "tapa_abierta = ?, " +
+                            "ultimo_check = ? " +
+                            "WHERE impresora_id = ?",
+                            printer.EstadoOnline,
+                            printer.DisponibleParaImprimir,
+                            printer.TienePapel,
+                            printer.TapaAbierta,
+                            printer.UltimoCheck,
+                            printer.ImpresoraId);
+                    }
+                    catch (Exception exUpd)
+                    {
+                        Log.WarnFormat("[MONITOR] UPDATE selectivo falló para {0}: {1}",
+                            printer.ImpresoraId, exUpd.Message);
+                    }
 
                     // ═══════════════════════════════════════════════════════════════════════════════
                     // PASO 5: PROPAGAR ESTADO A IMPRESORAS RELACIONADAS (PRINCIPIO DIP + SRP)
@@ -801,6 +887,162 @@ namespace PrinterServices.Monitoring
         {
             int timeoutMs = ConfigManager.Instance.GetInt("TcpConnectTimeoutMs", 3000);
             return UsbPrinterStatusChecker.CheckSync(usbUniqueKey, timeoutMs);
+        }
+
+        // ═════════════════════════════════════════════════════════════════════════
+        // Probe de capacidades ESC/POS (piggyback del tick)
+        // ═════════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Decide si una impresora debe ser probada en este tick. Prioridad:
+        ///   1) Si el scheduler tiene un trigger pendiente (sync/manual/first_job_day), probar SÍ.
+        ///   2) Si nunca fue probada (capabilities_detected_at nulo), probar SÍ.
+        ///   3) Si el último probe falló Y pasaron más de CapabilityProbeRetryHours, probar SÍ.
+        ///   4) Si pasaron más de CapabilityProbeIntervalHours desde el último probe, probar SÍ.
+        ///   5) Si nada de lo anterior, no probar este tick.
+        /// </summary>
+        private bool DebeProbarImpresora(PrinterEntity printer)
+        {
+            if (printer == null) return false;
+            if (ConfigManager.Instance.GetInt("CapabilityProbeEnabled", 1) == 0) return false;
+
+            // 1) Trigger pendiente en el scheduler → probar ya (sin importar timing)
+            // NOTA: solo consultamos, no extraemos. El trigger se extrae en EjecutarProbeAsync.
+            // 2-4) Timing basado en capabilities_detected_at
+            string detectedAt = printer.CapabilitiesDetectedAt;
+            if (string.IsNullOrEmpty(detectedAt)) return true;  // nunca probada
+
+            DateTime ultima;
+            if (!DateTime.TryParse(detectedAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out ultima))
+                return true;  // fecha inválida → probar
+
+            double horasDesdeUltimo = (DateTime.UtcNow - ultima.ToUniversalTime()).TotalHours;
+
+            // Si el perfil anterior fue probe_failed, usar retry más corto
+            bool ultimaFalló = string.Equals(printer.CapabilitiesProfile, "probe_failed", StringComparison.OrdinalIgnoreCase);
+            int horasFreno = ultimaFalló
+                ? ConfigManager.Instance.GetInt("CapabilityProbeRetryHours", 4)
+                : ConfigManager.Instance.GetInt("CapabilityProbeIntervalHours", 24);
+
+            return horasDesdeUltimo >= horasFreno;
+        }
+
+        /// <summary>
+        /// Ejecuta el probe de capacidades. Se asume que el caller ya tiene el port lock
+        /// y que validó las defensas (queue-aware, online). Persiste el resultado en
+        /// las columnas capabilities_* de la impresora vía UPDATE selectivo.
+        /// </summary>
+        private async Task EjecutarProbeAsync(PrinterEntity printer, PrinterStatus statusPrevio, CancellationToken ct)
+        {
+            // Determinar trigger: si había uno en el scheduler, lo tomamos; sino es "periodic".
+            string trigger = _probeScheduler != null ? _probeScheduler.TomarProbePendiente(printer.ImpresoraId) : null;
+            if (string.IsNullOrEmpty(trigger))
+                trigger = string.IsNullOrEmpty(printer.CapabilitiesDetectedAt) ? "unknown" : "periodic";
+
+            int presupuestoMs = ConfigManager.Instance.GetInt("CapabilityProbeMaxTotalMs", 2000);
+
+            // CTS linked al token del monitor + cancelable desde JobEncolado del PrintJobManager.
+            // Si llega un job para esta impresora durante el probe, el scheduler dispara Cancel().
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            if (_probeScheduler != null)
+                _probeScheduler.RegistrarProbeActivo(printer.ImpresoraId, printer.Ip, cts);
+
+            // Recorder que captura cada comando enviado y cada byte recibido
+            // durante el probe. Al final lo persistimos en printer_capability_probe_log
+            // para que el dashboard muestre en el modal de la impresora lo que exactamente
+            // pasó durante el análisis (máxima transparencia para el operador).
+            var transcript = new CommandTranscriptRecorder();
+
+            Core.Network.CapabilityResult resultado = null;
+            try
+            {
+                resultado = await PrinterCapabilityProbe.ProbarAsync(
+                    printer.Ip, printer.Puerto,
+                    statusPrevio,
+                    transcript: transcript,
+                    trigger: trigger,
+                    presupuestoMsTotal: presupuestoMs,
+                    ct: cts.Token);
+            }
+            finally
+            {
+                if (_probeScheduler != null) _probeScheduler.DesregistrarProbeActivo(printer.Ip);
+                cts.Dispose();
+            }
+
+            if (resultado == null) return;
+            PersistirCapabilities(printer, resultado);
+
+            // Volcar el transcript del probe a su propia tabla (reemplaza el anterior).
+            try
+            {
+                int filas = transcript.FlushProbeBatch(printer.ImpresoraId, _db);
+                if (filas > 0)
+                    Log.DebugFormat("[MONITOR] Transcript del probe de {0} guardado: {1} filas",
+                        printer.ImpresoraId, filas);
+            }
+            catch (Exception ex)
+            {
+                Log.Debug("[MONITOR] No se pudo guardar transcript del probe: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Guarda el resultado del probe en la fila de la impresora vía UPDATE selectivo.
+        /// RAZÓN: usamos SQL directo en vez de _db.Update(printer) para NO pisar otras
+        /// columnas que pueden haber cambiado entre que leímos y ahora (estado_online,
+        /// tiene_papel, ultimo_check las maneja el StatusMonitor exclusivamente).
+        /// </summary>
+        private void PersistirCapabilities(PrinterEntity printer, Core.Network.CapabilityResult r)
+        {
+            try
+            {
+                _db.Execute(
+                    "UPDATE printers SET " +
+                    "capabilities_profile = ?, " +
+                    "supports_dle_eot = ?, " +
+                    "supports_dle_eot_bits = ?, " +
+                    "supports_asb = ?, " +
+                    "supports_process_id_response = ?, " +
+                    "firmware_raw = ?, " +
+                    "firmware_parsed = ?, " +
+                    "capabilities_detected_at = ?, " +
+                    "capabilities_probe_count = capabilities_probe_count + 1, " +
+                    "capabilities_probe_duration_ms = ?, " +
+                    "capabilities_last_error = ?, " +
+                    "capabilities_last_trigger = ? " +
+                    "WHERE impresora_id = ?",
+                    r.Profile ?? "unknown",
+                    r.SupportsDleEot ? 1 : 0,
+                    r.SupportsDleEotBits,
+                    r.SupportsAsb ? 1 : 0,
+                    r.SupportsProcessIdResponse ? 1 : 0,
+                    r.FirmwareRaw,
+                    r.FirmwareParsed,
+                    r.CompletedAtUtc,
+                    r.DurationMs,
+                    r.LastError,
+                    r.Trigger,
+                    printer.ImpresoraId);
+
+                // Reflejar en la entidad en RAM para que el resto del tick vea el valor nuevo.
+                printer.CapabilitiesProfile = r.Profile;
+                printer.SupportsDleEot = r.SupportsDleEot ? 1 : 0;
+                printer.SupportsDleEotBits = r.SupportsDleEotBits;
+                printer.SupportsAsb = r.SupportsAsb ? 1 : 0;
+                printer.SupportsProcessIdResponse = r.SupportsProcessIdResponse ? 1 : 0;
+                printer.FirmwareRaw = r.FirmwareRaw;
+                printer.FirmwareParsed = r.FirmwareParsed;
+                printer.CapabilitiesDetectedAt = r.CompletedAtUtc;
+                printer.CapabilitiesProbeCount += 1;
+                printer.CapabilitiesProbeDurationMs = r.DurationMs;
+                printer.CapabilitiesLastError = r.LastError;
+                printer.CapabilitiesLastTrigger = r.Trigger;
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("[MONITOR] No se pudo persistir capabilities de " + printer.ImpresoraId + ": " + ex.Message);
+            }
         }
     }
 }

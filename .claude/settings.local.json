@@ -9,7 +9,10 @@
       "Bash(python3 -c \"import pypdf; print\\(pypdf.__version__\\)\")",
       "Bash(brew list *)",
       "Bash(python3 -m pip install --quiet --user pypdf)",
-      "WebFetch(domain:download4.epson.biz)"
+      "WebFetch(domain:download4.epson.biz)",
+      "Bash(command -v msbuild)",
+      "Bash(command -v xbuild)",
+      "Bash(command -v dotnet)"
     ]
   }
 }

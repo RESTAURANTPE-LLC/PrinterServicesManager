@@ -504,8 +504,13 @@ namespace PrinterServices.Workers
                         using (Bitmap bmp = Rendering.ComandaBitmapRenderer.RenderFromLines(renderLines))
                         using (Bitmap resized = BitmapResizer.ResizeIfNeeded(bmp, 576))
                         {
-                            AddBitmapByEmulation(builder, resized);
                             estimatedWaitMs = PrintDurationEstimator.EstimateMs(resized);
+                            // Diagnóstico: si GuardarBitmapsGenerados=1, persiste el JPG + características.
+                            Services.Printers.BitmapDiagnosticSaver.GuardarSiEstaActivo(
+                                job, resized, "disenador_visual",
+                                ConfigManager.Instance.GetString("BitmapEmulacion", "escpos"),
+                                estimatedWaitMs, _db);
+                            AddBitmapByEmulation(builder, resized);
                         }
 
                         if (job.AbreGaveta)
@@ -566,8 +571,12 @@ namespace PrinterServices.Workers
                     using (Bitmap bmp = Rendering.ComandaBitmapRenderer.RenderFromLines(renderLines))
                     using (Bitmap resized = BitmapResizer.ResizeIfNeeded(bmp, 576))
                     {
-                        AddBitmapByEmulation(builder, resized);
                         estimatedWaitMs = PrintDurationEstimator.EstimateMs(resized);
+                        Services.Printers.BitmapDiagnosticSaver.GuardarSiEstaActivo(
+                            job, resized, "formato_antiguo",
+                            ConfigManager.Instance.GetString("BitmapEmulacion", "escpos"),
+                            estimatedWaitMs, _db);
+                        AddBitmapByEmulation(builder, resized);
                     }
 
                     if (job.AbreGaveta)
@@ -608,8 +617,12 @@ namespace PrinterServices.Workers
                 using (Bitmap bmp = HtmlBitmapRenderer.RenderSimpleHtmlAsBitmap(htmlParaRenderizar))
                 using (Bitmap resized = BitmapResizer.ResizeIfNeeded(bmp, 576))
                 {
-                    AddBitmapByEmulation(builder, resized);
                     estimatedWaitMs = PrintDurationEstimator.EstimateMs(resized);
+                    Services.Printers.BitmapDiagnosticSaver.GuardarSiEstaActivo(
+                        job, resized, "html_bitmap",
+                        ConfigManager.Instance.GetString("BitmapEmulacion", "escpos"),
+                        estimatedWaitMs, _db);
+                    AddBitmapByEmulation(builder, resized);
                 }
 
                 if (job.AbreGaveta)

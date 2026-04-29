@@ -8,6 +8,7 @@ using log4net;
 using PrinterServices.Config;
 using PrinterServices.Data;
 using PrinterServices.Queue;
+using PrinterServices.Services.Printers;
 
 namespace PrinterServices.Api
 {
@@ -20,12 +21,31 @@ namespace PrinterServices.Api
         private readonly CancellationTokenSource _cts;
         private readonly int _port;
 
+        // Constructor original (compatibilidad).
         public HttpApiServer(int port, PrinterServiceDb db, PrintJobManager jobManager, ConfigManager configManager)
+            : this(port, db, jobManager, configManager, null, null, null) { }
+
+        // Constructor con ProbeScheduler (compatibilidad intermedia).
+        public HttpApiServer(int port, PrinterServiceDb db, PrintJobManager jobManager, ConfigManager configManager,
+            ProbeScheduler probeScheduler)
+            : this(port, db, jobManager, configManager, probeScheduler, null, null) { }
+
+        // Constructor con ProbeScheduler + DbMaintenanceWorker.
+        public HttpApiServer(int port, PrinterServiceDb db, PrintJobManager jobManager, ConfigManager configManager,
+            ProbeScheduler probeScheduler, PrinterServices.Workers.DbMaintenanceWorker dbMaintenanceWorker)
+            : this(port, db, jobManager, configManager, probeScheduler, dbMaintenanceWorker, null) { }
+
+        // Constructor completo: recibe también el PrinterDiscoveryService para el
+        // buscador de impresoras multi-protocolo del dashboard.
+        public HttpApiServer(int port, PrinterServiceDb db, PrintJobManager jobManager, ConfigManager configManager,
+            ProbeScheduler probeScheduler,
+            PrinterServices.Workers.DbMaintenanceWorker dbMaintenanceWorker,
+            PrinterServices.Services.Discovery.PrinterDiscoveryService discoveryService)
         {
             _port = port;
             _cts = new CancellationTokenSource();
             _listener = new HttpListener();
-            _router = new ApiRouter(db, jobManager, configManager);
+            _router = new ApiRouter(db, jobManager, configManager, probeScheduler, dbMaintenanceWorker, discoveryService);
         }
 
         public void Start()

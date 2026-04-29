@@ -25,12 +25,33 @@ namespace PrinterServices.Api.Controllers
         private readonly ConfigManager _config;
         private readonly DateTime _serviceStartTime;
 
+        // Worker de mantenimiento de BD. Opcional (null = endpoints /db-maintenance
+        // devuelven 503). Se inyecta desde Host/ApiRouter para que el dashboard
+        // pueda disparar purga manual y mostrar info de tamaño.
+        private readonly PrinterServices.Workers.DbMaintenanceWorker _dbMaintenanceWorker;
+
+        // Servicio de descubrimiento multi-protocolo de impresoras. Opcional (null =
+        // los endpoints /discovery/* devuelven 503). Maneja sesiones en memoria con
+        // threading aparte — no afecta al StatusMonitor ni al PrintWorker.
+        private readonly PrinterServices.Services.Discovery.PrinterDiscoveryService _discoveryService;
+
         public DashboardController(PrinterServiceDb db, PrintJobManager jobManager, ConfigManager config, DateTime serviceStartTime)
+            : this(db, jobManager, config, serviceStartTime, null, null) { }
+
+        public DashboardController(PrinterServiceDb db, PrintJobManager jobManager, ConfigManager config, DateTime serviceStartTime,
+            PrinterServices.Workers.DbMaintenanceWorker dbMaintenanceWorker)
+            : this(db, jobManager, config, serviceStartTime, dbMaintenanceWorker, null) { }
+
+        public DashboardController(PrinterServiceDb db, PrintJobManager jobManager, ConfigManager config, DateTime serviceStartTime,
+            PrinterServices.Workers.DbMaintenanceWorker dbMaintenanceWorker,
+            PrinterServices.Services.Discovery.PrinterDiscoveryService discoveryService)
         {
             _db = db ?? throw new ArgumentNullException(nameof(db));
             _jobManager = jobManager ?? throw new ArgumentNullException(nameof(jobManager));
             _config = config ?? throw new ArgumentNullException(nameof(config));
             _serviceStartTime = serviceStartTime;
+            _dbMaintenanceWorker = dbMaintenanceWorker;
+            _discoveryService = discoveryService;
         }
 
         /// <summary>
@@ -83,7 +104,10 @@ namespace PrinterServices.Api.Controllers
 
         /// <summary>
         /// GET /api/dashboard/job/{jobId} — Retorna detalle completo de un job.
-        /// RAZÓN: Modal de detalle en dashboard.
+        /// Incluye: info del job, capacidades actuales de la impresora, intentos
+        /// registrados (print_job_attempts) y el transcript de comandos ESC/POS
+        /// (print_job_attempt_commands) por intento. El modal lo renderiza en
+        /// secciones expandibles.
         /// </summary>
         public void HandleJobDetail(HttpListenerContext ctx, string jobId)
         {
@@ -103,6 +127,110 @@ namespace PrinterServices.Api.Controllers
                 // RAZÓN: Obtener nombre de impresora
                 var printer = _db.Table<Data.Models.PrinterEntity>()
                     .FirstOrDefault(p => p.ImpresoraId == job.ImpresoraId);
+
+                // Calcular duración total del job si está terminado.
+                long? duracionMs = CalcularDuracionMs(job.FechaCreacion, job.FechaImpresion);
+
+                // Decodificar el DLE EOT del pre-check a legenda humana usando el
+                // mismo parser del reporte de conectividad (fuente de verdad única).
+                string dleLegend = null;
+                if (!string.IsNullOrEmpty(job.PrinterResponse))
+                {
+                    try { dleLegend = Monitoring.PrinterStatusChecker.Explain(job.PrinterResponse); }
+                    catch { dleLegend = null; }
+                }
+
+                // Snapshot de capacidades actuales de la impresora (pueden haber
+                // sido actualizadas después del job, pero es lo mejor que tenemos
+                // hasta que PR 4 persista las caps POR INTENTO).
+                object caps = null;
+                if (printer != null)
+                {
+                    caps = new
+                    {
+                        profile = printer.CapabilitiesProfile ?? "unknown",
+                        supportsDleEot = printer.SupportsDleEot == 1,
+                        supportsDleEotBits = printer.SupportsDleEotBits,
+                        supportsAsb = printer.SupportsAsb == 1,
+                        supportsProcessIdResponse = printer.SupportsProcessIdResponse == 1,
+                        firmwareParsed = printer.FirmwareParsed,
+                        firmwareRaw = printer.FirmwareRaw,
+                        detectedAt = printer.CapabilitiesDetectedAt,
+                        probeCount = printer.CapabilitiesProbeCount,
+                        probeDurationMs = printer.CapabilitiesProbeDurationMs,
+                        lastTrigger = printer.CapabilitiesLastTrigger,
+                        lastError = printer.CapabilitiesLastError
+                    };
+                }
+
+                // Intentos registrados para este job (tabla print_job_attempts).
+                // Si el job fue creado antes de PR 1 o si PR 4 no está integrado todavía,
+                // la lista estará vacía — el front muestra un hint.
+                var intentos = _db.Query<Data.Models.PrintJobAttemptEntity>(
+                    "SELECT * FROM print_job_attempts WHERE job_id = ? ORDER BY attempt_number ASC",
+                    jobId);
+
+                // Ids de intentos para cargar comandos en UNA sola query.
+                var intentoIds = new List<long>();
+                foreach (var it in intentos) intentoIds.Add(it.Id);
+
+                // Transcript de comandos de todos los intentos de este job.
+                // Se agrupa en el response por attempt_id para que el front lo renderice.
+                List<Data.Models.PrintJobAttemptCommandEntity> comandosTodos = new List<Data.Models.PrintJobAttemptCommandEntity>();
+                if (intentoIds.Count > 0)
+                {
+                    string inClause = string.Join(",", intentoIds);
+                    // inClause viene de ids internos numéricos, no de user input — seguro.
+                    comandosTodos = _db.Query<Data.Models.PrintJobAttemptCommandEntity>(
+                        "SELECT * FROM print_job_attempt_commands WHERE attempt_id IN (" + inClause + ") " +
+                        "ORDER BY attempt_id ASC, sequence_num ASC");
+                }
+
+                var intentosSerializables = intentos.Select(i => new
+                {
+                    id = i.Id,
+                    attemptNumber = i.AttemptNumber,
+                    startedAt = i.StartedAt,
+                    startedAtLocal = i.StartedAtLocal,
+                    endedAt = i.EndedAt,
+                    endedAtLocal = i.EndedAtLocal,
+                    outcome = i.Outcome,
+                    failReason = i.FailReason,
+                    printerResponsePre = i.PrinterResponsePre,
+                    printerResponsePreLegend = i.PrinterResponsePreLegend,
+                    printerResponsePost = i.PrinterResponsePost,
+                    printerResponsePostLegend = i.PrinterResponsePostLegend,
+                    portLockWaitMs = i.PortLockWaitMs,
+                    tcpConnectMs = i.TcpConnectMs,
+                    dataSendMs = i.DataSendMs,
+                    postPrintWaitEstimatedMs = i.PostPrintWaitEstimatedMs,
+                    postPrintWaitActualMs = i.PostPrintWaitActualMs,
+                    payloadBytes = i.PayloadBytes,
+                    copies = i.Copies,
+                    exceptionType = i.ExceptionType,
+                    exceptionMessage = i.ExceptionMessage,
+                    confirmationMethod = i.ConfirmationMethod,
+                    confirmationResult = i.ConfirmationResult,
+                    confirmationDetail = i.ConfirmationDetail,
+                    suspiciousFastSend = i.SuspiciousFastSend == 1,
+                    finalDecisionRationale = i.FinalDecisionRationale,
+                    // Subset de comandos de este intento
+                    commands = comandosTodos.Where(c => c.AttemptId == i.Id).Select(c => new
+                    {
+                        sequenceNum = c.SequenceNum,
+                        phase = c.Phase,
+                        direction = c.Direction,
+                        commandName = c.CommandName,
+                        bytesHex = c.BytesHex,
+                        bytesLength = c.BytesLength,
+                        bytesSha256 = c.BytesSha256,
+                        timestampUtc = c.TimestampUtc,
+                        timestampLocal = c.TimestampLocal,
+                        offsetMs = c.OffsetMs,
+                        durationMs = c.DurationMs,
+                        notes = c.Notes
+                    }).ToList()
+                }).ToList();
 
                 var data = new
                 {
@@ -125,11 +253,17 @@ namespace PrinterServices.Api.Controllers
                     areaImpresion = job.AreaImpresion ?? "", // Área de producción (ej: "COCINA AUXILIAR")
                     fechaCreacion = job.FechaCreacion,
                     fechaImpresion = job.FechaImpresion,
+                    duracionMs = duracionMs,
                     errorMensaje = job.ErrorMensaje,
                     printerResponse = job.PrinterResponse,
+                    printerResponseLegend = dleLegend,
                     contenido = job.Contenido,
                     abreGaveta = job.AbreGaveta,
-                    codigoCorte = job.CodigoCorte
+                    codigoCorte = job.CodigoCorte,
+                    // Secciones nuevas: capacidades + intentos con su transcript
+                    capabilities = caps,
+                    intentos = intentosSerializables,
+                    intentosCount = intentosSerializables.Count
                 };
 
                 string json = JsonConvert.SerializeObject(data, Formatting.Indented);
@@ -929,6 +1063,402 @@ namespace PrinterServices.Api.Controllers
             return "127.0.0.1";
         }
 
+        // ═════════════════════════════════════════════════════════════════════════
+        // Mantenimiento de BD: endpoints para el dashboard
+        // ═════════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// GET /api/dashboard/db-maintenance/info
+        /// Devuelve tamaño actual del archivo .db, máximo configurado, top tablas por
+        /// cantidad de filas, y datos de la última purga (cuándo, modo, filas eliminadas).
+        /// </summary>
+        public void HandleDbMaintenanceInfo(HttpListenerContext ctx)
+        {
+            try
+            {
+                if (_dbMaintenanceWorker == null)
+                {
+                    WriteJsonResponse(ctx, 503, new { error = "DbMaintenanceWorker no está habilitado en este servicio" });
+                    return;
+                }
+
+                var info = _dbMaintenanceWorker.ObtenerInfo();
+                var resp = new
+                {
+                    tamanioMb = Math.Round(info.TamanioMb, 2),
+                    tamanioMaxMb = info.TamanioMaxMb,
+                    excedeMaximo = info.TamanioMb > info.TamanioMaxMb,
+                    ultimaPurga = info.UltimaPurga,
+                    ultimaPurgaModo = info.UltimaPurgaModo,
+                    ultimaPurgaFilasEliminadas = info.UltimaPurgaFilasEliminadas,
+                    ultimaPurgaMbLiberados = Math.Round(info.UltimaPurgaBytesLiberados / 1024.0 / 1024.0, 2),
+                    conteoPorTabla = info.ConteoPorTabla
+                };
+                WriteJsonResponse(ctx, 200, resp);
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[DB-MAINT-API] Error obteniendo info", ex);
+                WriteJsonResponse(ctx, 500, new { error = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// POST /api/dashboard/db-maintenance/run
+        /// Dispara una purga manual inmediata. Devuelve el resumen (modo liviano/agresivo,
+        /// filas eliminadas, MB liberados, tamaño antes/después, si hizo VACUUM).
+        /// Solo accesible desde localhost (mismo patrón que HandleSqlQuery) porque es
+        /// una operación destructiva.
+        /// </summary>
+        public void HandleDbMaintenanceRun(HttpListenerContext ctx)
+        {
+            try
+            {
+                // Solo localhost — evitar que alguien de la red dispare purgas.
+                string ipCliente = ctx.Request.RemoteEndPoint != null ? ctx.Request.RemoteEndPoint.Address.ToString() : null;
+                if (ipCliente != "127.0.0.1" && ipCliente != "::1" && ipCliente != "localhost")
+                {
+                    WriteJsonResponse(ctx, 403, new { error = "Purga manual solo accesible desde localhost" });
+                    return;
+                }
+
+                if (_dbMaintenanceWorker == null)
+                {
+                    WriteJsonResponse(ctx, 503, new { error = "DbMaintenanceWorker no está habilitado" });
+                    return;
+                }
+
+                Log.InfoFormat("[DB-MAINT-API] Purga manual solicitada desde {0}", ipCliente);
+                var resumen = _dbMaintenanceWorker.PurgarAhora();
+
+                var resp = new
+                {
+                    exito = string.IsNullOrEmpty(resumen.Error),
+                    error = resumen.Error,
+                    modo = resumen.Modo,
+                    filasEliminadas = resumen.FilasEliminadas,
+                    mbLiberados = Math.Round(resumen.BytesLiberados / 1024.0 / 1024.0, 2),
+                    tamanioMbAntes = Math.Round(resumen.TamanioMbAntes, 2),
+                    tamanioMbDespues = Math.Round(resumen.TamanioMbDespues, 2),
+                    vacuumEjecutado = resumen.VacuumEjecutado
+                };
+                WriteJsonResponse(ctx, string.IsNullOrEmpty(resumen.Error) ? 200 : 500, resp);
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[DB-MAINT-API] Error en purga manual", ex);
+                WriteJsonResponse(ctx, 500, new { error = ex.Message });
+            }
+        }
+
+        // ═════════════════════════════════════════════════════════════════════════
+        // Bitmaps de diagnóstico por job (JPG + características)
+        // ═════════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// GET /api/dashboard/job/{id}/bitmap-info — JSON con características del
+        /// bitmap guardado para este job (si GuardarBitmapsGenerados estaba activo
+        /// cuando se imprimió). Devuelve 404 si no hay registro.
+        /// </summary>
+        public void HandleJobBitmapInfo(HttpListenerContext ctx, string jobId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(jobId))
+                {
+                    WriteJsonResponse(ctx, 400, new { error = "jobId requerido" });
+                    return;
+                }
+                var filas = _db.Query<Data.Models.PrintJobBitmapEntity>(
+                    "SELECT * FROM print_job_bitmaps WHERE job_id = ? ORDER BY id DESC",
+                    jobId);
+                if (filas == null || filas.Count == 0)
+                {
+                    WriteJsonResponse(ctx, 404, new { error = "Este job no tiene bitmap guardado. Activa GuardarBitmapsGenerados y vuelve a imprimir." });
+                    return;
+                }
+                // Devolver el más reciente (primera fila por ORDER BY DESC).
+                var b = filas[0];
+                WriteJsonResponse(ctx, 200, new
+                {
+                    jobId = b.JobId,
+                    generatedAtUtc = b.GeneratedAtUtc,
+                    generatedAtLocal = b.GeneratedAtLocal,
+                    bitmapPath = b.BitmapPath,
+                    modo = b.Modo,
+                    widthPx = b.WidthPx,
+                    heightPx = b.HeightPx,
+                    bitsPerPixel = b.BitsPerPixel,
+                    fileSizeBytes = b.FileSizeBytes,
+                    fileSizeKb = Math.Round(b.FileSizeBytes / 1024.0, 1),
+                    escposPayloadBytes = b.EscposPayloadBytes,
+                    escposPayloadKb = Math.Round(b.EscposPayloadBytes / 1024.0, 1),
+                    darkRatioAvg = Math.Round(b.DarkRatioAvg, 3),
+                    darkRatioAvgPct = Math.Round(b.DarkRatioAvg * 100, 1),
+                    darkRatioMaxRow = Math.Round(b.DarkRatioMaxRow, 3),
+                    darkRatioMaxRowPct = Math.Round(b.DarkRatioMaxRow * 100, 1),
+                    estimatedPrintMs = b.EstimatedPrintMs,
+                    bitmapEmulacion = b.BitmapEmulacion,
+                    printerModel = b.PrinterModel,
+                    targetIp = b.TargetIp,
+                    imageUrl = "/api/dashboard/job/" + b.JobId + "/bitmap"
+                });
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[BITMAP-API] Error leyendo info del bitmap", ex);
+                WriteJsonResponse(ctx, 500, new { error = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// GET /api/dashboard/job/{id}/bitmap — sirve el JPG guardado.
+        /// Content-Type: image/jpeg. Devuelve 404 si no existe.
+        /// </summary>
+        public void HandleJobBitmapJpeg(HttpListenerContext ctx, string jobId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(jobId))
+                {
+                    ctx.Response.StatusCode = 400;
+                    ctx.Response.Close();
+                    return;
+                }
+                var fila = _db.Query<Data.Models.PrintJobBitmapEntity>(
+                    "SELECT * FROM print_job_bitmaps WHERE job_id = ? ORDER BY id DESC LIMIT 1",
+                    jobId);
+                if (fila == null || fila.Count == 0)
+                {
+                    ctx.Response.StatusCode = 404;
+                    ctx.Response.Close();
+                    return;
+                }
+                string pathAbsoluto = PrinterServices.Services.Printers.BitmapDiagnosticSaver
+                    .ResolverPathAbsoluto(fila[0].BitmapPath);
+                if (string.IsNullOrEmpty(pathAbsoluto) || !System.IO.File.Exists(pathAbsoluto))
+                {
+                    ctx.Response.StatusCode = 404;
+                    ctx.Response.Close();
+                    return;
+                }
+                ctx.Response.ContentType = "image/jpeg";
+                var bytes = System.IO.File.ReadAllBytes(pathAbsoluto);
+                ctx.Response.ContentLength64 = bytes.Length;
+                ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+                ctx.Response.StatusCode = 200;
+                ctx.Response.Close();
+            }
+            catch (HttpListenerException)
+            {
+                try { ctx.Response.Close(); } catch { }
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[BITMAP-API] Error sirviendo JPG", ex);
+                try { ctx.Response.StatusCode = 500; ctx.Response.Close(); } catch { }
+            }
+        }
+
+        // ═════════════════════════════════════════════════════════════════════════
+        // Descubrimiento multi-protocolo de impresoras en la red
+        // ═════════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// POST /api/dashboard/discovery/start
+        /// Inicia una sesión de descubrimiento en background (ENPC + mDNS + SNMP + ARP/TCP).
+        /// Responde inmediatamente con el sessionId. La UI polling /status/{id} cada
+        /// ~800ms para ir viendo los resultados en vivo.
+        /// </summary>
+        public void HandleDiscoveryStart(HttpListenerContext ctx)
+        {
+            try
+            {
+                if (_discoveryService == null)
+                {
+                    WriteJsonResponse(ctx, 503, new { error = "Servicio de descubrimiento no disponible" });
+                    return;
+                }
+                var sesion = _discoveryService.Iniciar();
+                WriteJsonResponse(ctx, 200, new
+                {
+                    sessionId = sesion.Id,
+                    startedAt = sesion.StartedAtLocal,
+                    protocolos = sesion.Protocolos.ConvertAll(p => new
+                    {
+                        nombre = p.Nombre,
+                        metodo = p.Metodo,
+                        estado = p.Estado
+                    })
+                });
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[DISCOVERY-API] Error iniciando sesión", ex);
+                WriteJsonResponse(ctx, 500, new { error = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// GET /api/dashboard/discovery/status/{id}
+        /// Devuelve el estado actual de una sesión + resultados parciales. La UI lo
+        /// llama cada ~800ms mientras estado=running y una última vez al completarse.
+        /// Cada resultado viene enriquecido con YaAgregadaComoId/Nombre si la MAC
+        /// ya está en la tabla printers (el front muestra "Ya agregada como X").
+        /// </summary>
+        public void HandleDiscoveryStatus(HttpListenerContext ctx, string sessionId)
+        {
+            try
+            {
+                if (_discoveryService == null)
+                {
+                    WriteJsonResponse(ctx, 503, new { error = "Servicio de descubrimiento no disponible" });
+                    return;
+                }
+                var sesion = _discoveryService.Obtener(sessionId);
+                if (sesion == null)
+                {
+                    WriteJsonResponse(ctx, 404, new { error = "Sesión no encontrada o expirada" });
+                    return;
+                }
+                // Refrescar el flag "ya agregada" con el estado actual de BD.
+                _discoveryService.EnriquecerConRegistrosExistentes(sesion);
+
+                object resp;
+                lock (sesion.SyncRoot)
+                {
+                    resp = new
+                    {
+                        sessionId = sesion.Id,
+                        estado = sesion.Estado,
+                        startedAt = sesion.StartedAtLocal,
+                        completedAtUtc = sesion.CompletedAtUtc,
+                        duracionTotalMs = sesion.DuracionTotalMs,
+                        error = sesion.Error,
+                        protocolos = sesion.Protocolos.ConvertAll(p => new
+                        {
+                            nombre = p.Nombre,
+                            metodo = p.Metodo,
+                            estado = p.Estado,
+                            encontradas = p.Encontradas,
+                            duracionMs = p.DuracionMs,
+                            error = p.Error
+                        }),
+                        resultados = sesion.Resultados.ConvertAll(r => new
+                        {
+                            macFormateada = r.MacFormateada,
+                            macNormalizada = r.MacNormalizada,
+                            ip = r.Ip,
+                            tieneIp = r.TieneIp,
+                            vendor = r.Vendor,
+                            modelo = r.Modelo,
+                            hostname = r.Hostname,
+                            descubiertaPor = r.DescubiertaPor,
+                            yaAgregadaComoId = r.YaAgregadaComoId,
+                            yaAgregadaComoNombre = r.YaAgregadaComoNombre
+                        }),
+                        totalEncontradas = sesion.Resultados.Count
+                    };
+                }
+                WriteJsonResponse(ctx, 200, resp);
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[DISCOVERY-API] Error consultando sesión", ex);
+                WriteJsonResponse(ctx, 500, new { error = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// POST /api/dashboard/discovery/add
+        /// Body: { macNormalizada, ip, nombre, puerto, modelo, vendor }
+        /// Agrega una impresora descubierta a la tabla `printers`. Si la MAC ya
+        /// existe (dedup por MAC normalizada), devuelve 409 con el id/nombre
+        /// existente. Si no, inserta con impresora_id nuevo.
+        /// </summary>
+        public void HandleDiscoveryAdd(HttpListenerContext ctx)
+        {
+            try
+            {
+                string body;
+                using (var sr = new System.IO.StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
+                    body = sr.ReadToEnd();
+                if (string.IsNullOrEmpty(body))
+                {
+                    WriteJsonResponse(ctx, 400, new { error = "Body vacío" });
+                    return;
+                }
+
+                var dto = JsonConvert.DeserializeObject<Newtonsoft.Json.Linq.JObject>(body);
+                string macNorm = PrinterServices.Services.Discovery.PrinterDiscoveryService.NormalizarMac(
+                    (string)dto["macNormalizada"] ?? (string)dto["mac"]);
+                string ip = (string)dto["ip"];
+                string nombre = (string)dto["nombre"];
+                string modelo = (string)dto["modelo"];
+                string vendor = (string)dto["vendor"];
+                int puerto = dto["puerto"] != null ? (int)dto["puerto"] : 9100;
+
+                if (string.IsNullOrEmpty(macNorm))
+                {
+                    WriteJsonResponse(ctx, 400, new { error = "Se requiere MAC" });
+                    return;
+                }
+                if (string.IsNullOrEmpty(nombre))
+                {
+                    WriteJsonResponse(ctx, 400, new { error = "Se requiere nombre visible" });
+                    return;
+                }
+
+                // Chequear si ya existe por MAC.
+                var yaExiste = _db.Query<Data.Models.PrinterEntity>(
+                    "SELECT * FROM printers WHERE REPLACE(REPLACE(REPLACE(UPPER(mac_address), ':', ''), '-', ''), '.', '') = ? LIMIT 1",
+                    macNorm);
+                if (yaExiste != null && yaExiste.Count > 0)
+                {
+                    var e = yaExiste[0];
+                    WriteJsonResponse(ctx, 409, new
+                    {
+                        error = "Impresora ya registrada",
+                        impresoraId = e.ImpresoraId,
+                        nombre = e.Nombre,
+                        ip = e.Ip
+                    });
+                    return;
+                }
+
+                // Insert. Generamos un impresora_id nuevo.
+                string nuevoId = "DISC_" + Guid.NewGuid().ToString("N").Substring(0, 8).ToUpperInvariant();
+                var entity = new Data.Models.PrinterEntity
+                {
+                    ImpresoraId = nuevoId,
+                    Nombre = nombre,
+                    Ip = string.IsNullOrEmpty(ip) ? "" : ip,
+                    Puerto = puerto > 0 ? puerto : 9100,
+                    MacAddress = macNorm,
+                    Modelo = modelo,
+                    TipoConexion = "RED",
+                    FechaRegistro = DateTime.Now.ToString("o")
+                };
+                _db.Insert(entity);
+                Log.InfoFormat("[DISCOVERY-API] Impresora agregada: {0} ({1}) MAC={2} IP={3}",
+                    nuevoId, nombre, macNorm, ip ?? "sin IP");
+
+                WriteJsonResponse(ctx, 200, new
+                {
+                    exito = true,
+                    impresoraId = nuevoId,
+                    nombre = nombre,
+                    mac = macNorm,
+                    ip = ip
+                });
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[DISCOVERY-API] Error agregando impresora", ex);
+                WriteJsonResponse(ctx, 500, new { error = ex.Message });
+            }
+        }
+
         private void WriteRawJsonResponse(HttpListenerContext ctx, int statusCode, string json)
         {
             try { var buffer = Encoding.UTF8.GetBytes(json); ctx.Response.ContentType = "application/json; charset=utf-8"; ctx.Response.StatusCode = statusCode; ctx.Response.ContentLength64 = buffer.Length; ctx.Response.OutputStream.Write(buffer, 0, buffer.Length); ctx.Response.Close(); }
@@ -939,6 +1469,21 @@ namespace PrinterServices.Api.Controllers
         {
             try { var json = JsonConvert.SerializeObject(data); var buffer = Encoding.UTF8.GetBytes(json); ctx.Response.ContentType = "application/json; charset=utf-8"; ctx.Response.StatusCode = statusCode; ctx.Response.ContentLength64 = buffer.Length; ctx.Response.OutputStream.Write(buffer, 0, buffer.Length); ctx.Response.Close(); }
             catch (HttpListenerException) { try { ctx.Response.Close(); } catch { } }
+        }
+
+        /// <summary>
+        /// Calcula la duración en ms entre dos fechas ISO 8601. Retorna null si
+        /// alguna falta o no se puede parsear, para que la UI muestre "-".
+        /// </summary>
+        private static long? CalcularDuracionMs(string fechaInicio, string fechaFin)
+        {
+            if (string.IsNullOrEmpty(fechaInicio) || string.IsNullOrEmpty(fechaFin)) return null;
+            DateTime inicio, fin;
+            if (!DateTime.TryParse(fechaInicio, null, System.Globalization.DateTimeStyles.RoundtripKind, out inicio)) return null;
+            if (!DateTime.TryParse(fechaFin, null, System.Globalization.DateTimeStyles.RoundtripKind, out fin)) return null;
+            double ms = (fin - inicio).TotalMilliseconds;
+            if (ms < 0) return null;
+            return (long)ms;
         }
     }
 }

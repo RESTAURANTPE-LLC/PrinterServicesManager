@@ -20,6 +20,7 @@
     <DefineConstants>DEBUG;TRACE</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
     <DebugType>pdbonly</DebugType>
@@ -28,6 +29,7 @@
     <DefineConstants>TRACE</DefineConstants>
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="Newtonsoft.Json, Version=13.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
@@ -83,6 +85,7 @@
   <ItemGroup>
     <Compile Include="Core\Network\ServiceVersion.cs" />
     <Compile Include="Data\Models\PrintedJobHashEntity.cs" />
+    <Compile Include="Data\Models\PrintJobBitmapEntity.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="PrinterServicesHost.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
@@ -104,6 +107,14 @@
     <Compile Include="Drivers\EscPosCommandBuilder.cs" />
     <Compile Include="Drivers\LineaParser.cs" />
     <Compile Include="Rendering\RenderLine.cs" />
+    <Compile Include="Services\Discovery\ArpTcp9100Discovery.cs" />
+    <Compile Include="Services\Discovery\DiscoveryModels.cs" />
+    <Compile Include="Services\Discovery\EnpcDiscovery.cs" />
+    <Compile Include="Services\Discovery\MdnsDiscovery.cs" />
+    <Compile Include="Services\Discovery\PrinterDiscoveryService.cs" />
+    <Compile Include="Services\Discovery\SnmpBroadcastDiscovery.cs" />
+    <Compile Include="Services\Printers\BitmapDiagnosticSaver.cs" />
+    <Compile Include="Services\SystemInfo\SystemInfoCollector.cs" />
     <Compile Include="Transport\ITransport.cs" />
     <Compile Include="Transport\TcpTransport.cs" />
     <Compile Include="Transport\UsbDeviceIdentity.cs" />
@@ -183,6 +194,13 @@
     <Compile Include="Data\Models\JobStatusCallbackDto.cs" />
     <Compile Include="Workers\NotificationRetryWorker.cs" />
     <Compile Include="Workers\DbMaintenanceWorker.cs" />
+    <Compile Include="Data\Models\PrintJobAttemptEntity.cs" />
+    <Compile Include="Data\Models\PrintJobAttemptCommandEntity.cs" />
+    <Compile Include="Data\Models\PrinterProbeLogEntity.cs" />
+    <Compile Include="Services\Printers\CommandTranscriptRecorder.cs" />
+    <Compile Include="Core\Network\CapabilityResult.cs" />
+    <Compile Include="Services\Printers\PrinterCapabilityProbe.cs" />
+    <Compile Include="Services\Printers\ProbeScheduler.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />

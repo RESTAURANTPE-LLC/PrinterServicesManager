@@ -7,6 +7,7 @@ using Newtonsoft.Json.Linq;
 using PrinterServices.Core.Network;
 using PrinterServices.Data;
 using PrinterServices.Data.Models;
+using PrinterServices.Services.Printers;
 using PrinterServices.Transport;
 
 namespace PrinterServices.Api.Controllers
@@ -17,9 +18,17 @@ namespace PrinterServices.Api.Controllers
 
         private readonly PrinterServiceDb _db;
 
-        public PrinterController(PrinterServiceDb db)
+        // Scheduler de probes de capacidades ESC/POS. Opcional para compatibilidad:
+        // si es null, el endpoint manual /probe-capabilities devuelve 503 y el trigger
+        // post-sync simplemente no se dispara (el probe periódico de 24h igual corre).
+        private readonly ProbeScheduler _probeScheduler;
+
+        public PrinterController(PrinterServiceDb db) : this(db, null) { }
+
+        public PrinterController(PrinterServiceDb db, ProbeScheduler probeScheduler)
         {
             _db = db;
+            _probeScheduler = probeScheduler;
         }
 
         public ApiResult GetAllPrinters()
@@ -600,8 +609,15 @@ namespace PrinterServices.Api.Controllers
                 // Crear respuesta exitosa con estadísticas
                 var response = SyncResponseDto.Success(insertedCount, updatedCount);
 
-                Log.InfoFormat("[PRINTER-SYNC] ✅ Sincronización completada: {0} impresoras ({1} nuevas, {2} actualizadas, {3} omitidas por MAC duplicada)", 
+                Log.InfoFormat("[PRINTER-SYNC] ✅ Sincronización completada: {0} impresoras ({1} nuevas, {2} actualizadas, {3} omitidas por MAC duplicada)",
                     response.synchronized, insertedCount, updatedCount, skippedDupMac); // Log de resumen
+
+                // ─── Disparar probes de capacidades para las impresoras sincronizadas ───
+                // RAZÓN: después de un sync, las caps almacenadas pueden ser stale (firmware
+                // actualizado, impresora reemplazada por otra en la misma IP, etc.). El
+                // scheduler las encola; el próximo tick del StatusMonitor las probará
+                // respetando las defensas anti-colisión.
+                DispararProbesPostSync();
 
                 // Serializar DTO a JSON y retornar 200 OK
                 return ApiResult.Ok(JsonConvert.SerializeObject(response));
@@ -626,6 +642,94 @@ namespace PrinterServices.Api.Controllers
         /// Descubre impresoras USB conectadas al equipo.
         /// Análogo a un "ARP scan" pero para dispositivos USB.
         /// Retorna VID, PID, Serial, DevicePath y FriendlyName de cada impresora encontrada.
+        /// POST /api/printer/reset/{id} — Envía comando ESC/POS de reset a la impresora.
+        /// Secuencia: ESC @ (initialize) + DLE EOT 1 (status query) para desbloquear.
+        /// Útil cuando la impresora se queda en estado bloqueado (ej: E3NSTART RPT008).
+        /// </summary>
+        public ApiResult ResetPrinter(string impresoraId)
+        {
+            try
+            {
+                var printer = _db.Table<PrinterEntity>().FirstOrDefault(p => p.ImpresoraId == impresoraId);
+                if (printer == null)
+                    return ApiResult.NotFound();
+
+                if (string.IsNullOrEmpty(printer.Ip) || printer.Ip.Contains(":"))
+                    return ApiResult.Error("IP invalida: " + (printer.Ip ?? "null"));
+
+                int port = printer.Puerto > 0 ? printer.Puerto : 9100;
+                int timeout = 3000;
+
+                Log.InfoFormat("[PRINTER-RESET] Enviando reset a {0} ({1}:{2})", printer.Nombre ?? impresoraId, printer.Ip, port);
+
+                using (var socket = new System.Net.Sockets.Socket(
+                    System.Net.Sockets.AddressFamily.InterNetwork,
+                    System.Net.Sockets.SocketType.Stream,
+                    System.Net.Sockets.ProtocolType.Tcp))
+                {
+                    socket.NoDelay = true;
+                    socket.ReceiveTimeout = timeout;
+                    socket.SendTimeout = timeout;
+
+                    var connectResult = socket.BeginConnect(printer.Ip, port, null, null);
+                    bool connected = connectResult.AsyncWaitHandle.WaitOne(timeout, true);
+
+                    if (!connected || !socket.Connected)
+                    {
+                        Log.Warn("[PRINTER-RESET] No se pudo conectar TCP");
+                        return ApiResult.Error("No se pudo conectar a " + printer.Ip + ":" + port);
+                    }
+
+                    // Secuencia de reset ESC/POS:
+                    // 1. ESC @ (0x1B 0x40) — Initialize printer (reset a valores default)
+                    // 2. DLE EOT 1 (0x10 0x04 0x01) — Status query (fuerza respuesta)
+                    // 3. GS ( A — Cancel print data (si hay datos en buffer)
+                    var resetCommands = new byte[]
+                    {
+                        0x10, 0x05, 0x01,       // DLE ENQ 1 — Real-time request (despierta la impresora)
+                        0x1B, 0x40,             // ESC @ — Initialize printer
+                        0x10, 0x04, 0x01,       // DLE EOT 1 — Request printer status
+                        0x1B, 0x40,             // ESC @ — Initialize printer (segundo intento)
+                    };
+
+                    socket.Send(resetCommands, 0, resetCommands.Length, System.Net.Sockets.SocketFlags.None);
+
+                    // Esperar respuesta (best effort)
+                    System.Threading.Thread.Sleep(500);
+
+                    // Leer respuesta si hay
+                    string responseInfo = "sin respuesta";
+                    if (socket.Available > 0)
+                    {
+                        var buf = new byte[64];
+                        int read = socket.Receive(buf, 0, buf.Length, System.Net.Sockets.SocketFlags.None);
+                        responseInfo = BitConverter.ToString(buf, 0, read);
+                    }
+
+                    if (socket.Connected)
+                        socket.Shutdown(System.Net.Sockets.SocketShutdown.Both);
+                    socket.Close();
+
+                    Log.InfoFormat("[PRINTER-RESET] Reset enviado a {0} — respuesta: {1}", printer.Nombre ?? impresoraId, responseInfo);
+
+                    return ApiResult.Ok(JsonConvert.SerializeObject(new
+                    {
+                        status = "OK",
+                        message = "Comando de reset enviado a " + (printer.Nombre ?? impresoraId),
+                        ip = printer.Ip,
+                        port = port,
+                        response = responseInfo
+                    }));
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[PRINTER-RESET] Error: " + ex.Message, ex);
+                return ApiResult.Error("Error al enviar reset: " + ex.Message);
+            }
+        }
+
+        /// <summary>
         /// El Front puede usar esta info para registrar impresoras USB (POST /api/printer/register).
         /// </summary>
         public ApiResult DiscoverUsbPrinters()
@@ -712,6 +816,131 @@ namespace PrinterServices.Api.Controllers
                 conflictingMac, winner.ImpresoraId, winner.Nombre, dto.impresora_id);
 
             return true;
+        }
+
+        // ═════════════════════════════════════════════════════════════════════════
+        // Probe de capacidades ESC/POS: endpoint manual + trigger post-sync
+        // ═════════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Encola un probe para cada impresora que acaba de sincronizarse desde
+        /// QuipuNet. El StatusMonitor los ejecutará en los próximos ticks, respetando
+        /// las defensas anti-colisión (queue-aware, cancel-on-job-arrival).
+        /// </summary>
+        private void DispararProbesPostSync()
+        {
+            if (_probeScheduler == null) return;  // probe deshabilitado o no inyectado
+            try
+            {
+                var impresoras = _db.Query<PrinterEntity>(
+                    "SELECT impresora_id FROM printers WHERE (ip IS NOT NULL AND ip != '') AND (tipo_conexion = 'RED' OR tipo_conexion IS NULL)");
+                if (impresoras == null) return;
+
+                int encolados = 0;
+                foreach (var p in impresoras)
+                {
+                    if (string.IsNullOrEmpty(p.ImpresoraId)) continue;
+                    _probeScheduler.EncolarProbe(p.ImpresoraId, "sync");
+                    encolados++;
+                }
+                Log.InfoFormat("[PRINTER-SYNC] Probes de capacidades encolados: {0}", encolados);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("[PRINTER-SYNC] No se pudieron encolar probes post-sync: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// GET /api/printers/{id}/probe-log
+        /// Devuelve el transcript del ÚLTIMO probe de capacidades de la impresora:
+        /// cada comando ESC/POS que le enviamos y cada respuesta que dio, en orden
+        /// cronológico. Para que el modal del dashboard muestre al operador lo
+        /// que exactamente pasó durante el análisis.
+        /// </summary>
+        public ApiResult ProbeLog(string impresoraId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(impresoraId))
+                    return ApiResult.BadRequest("impresora_id requerido");
+
+                var filas = _db.Query<PrinterProbeLogEntity>(
+                    "SELECT * FROM printer_capability_probe_log WHERE impresora_id = ? ORDER BY sequence_num ASC",
+                    impresoraId);
+
+                var items = filas.Select(f => new
+                {
+                    sequenceNum = f.SequenceNum,
+                    phase = f.Phase,
+                    direction = f.Direction,
+                    commandName = f.CommandName,
+                    bytesHex = f.BytesHex,
+                    bytesLength = f.BytesLength,
+                    timestampUtc = f.TimestampUtc,
+                    timestampLocal = f.TimestampLocal,
+                    offsetMs = f.OffsetMs,
+                    durationMs = f.DurationMs,
+                    notes = f.Notes
+                }).ToList();
+
+                var resp = new
+                {
+                    impresora_id = impresoraId,
+                    count = items.Count,
+                    items = items
+                };
+                return ApiResult.Ok(JsonConvert.SerializeObject(resp));
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[PROBE-API] Error leyendo transcript del probe", ex);
+                return ApiResult.Error(ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// POST /api/printers/{id}/probe-capabilities
+        /// Fuerza un probe inmediato de una impresora (bypassea la ventana temporal
+        /// del periódico 24h). El probe se ejecuta en el próximo tick del StatusMonitor.
+        /// El response devuelve SÓLO la confirmación del encolado — el resultado del
+        /// probe se persiste en las columnas capabilities_* de la impresora.
+        /// </summary>
+        public ApiResult ProbeCapabilities(string impresoraId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(impresoraId))
+                    return ApiResult.BadRequest("impresora_id requerido");
+
+                if (_probeScheduler == null)
+                    return new ApiResult(503, "{\"error\":\"Probe de capacidades no está habilitado en este servicio\"}");
+
+                // Verificar que la impresora existe.
+                var printer = _db.Query<PrinterEntity>(
+                    "SELECT * FROM printers WHERE impresora_id = ? LIMIT 1", impresoraId).FirstOrDefault();
+                if (printer == null)
+                    return ApiResult.NotFound();
+
+                _probeScheduler.EncolarProbe(impresoraId, "manual");
+
+                var resp = new
+                {
+                    impresora_id = impresoraId,
+                    nombre = printer.Nombre,
+                    ip = printer.Ip,
+                    encolado = true,
+                    mensaje = "Probe encolado. Se ejecutará en el próximo tick del monitor (≤ StatusCheckIntervalSeconds).",
+                    profile_actual = printer.CapabilitiesProfile,
+                    ultimo_probe = printer.CapabilitiesDetectedAt
+                };
+                return ApiResult.Ok(JsonConvert.SerializeObject(resp));
+            }
+            catch (Exception ex)
+            {
+                Log.Error("[PROBE-API] Error encolando probe manual", ex);
+                return ApiResult.Error(ex.Message);
+            }
         }
     }
 }

@@ -160,7 +160,26 @@ namespace PrinterServices.Workers
                     if (healthStatus == "changed")
                     {
                         // ❌ PrinterServices CAMBIÓ DE RED
-                        HandleNetworkChanged(currentConfig, lastKnownGood);
+                        // FIX: Solo disparar HandleNetworkChanged en la TRANSICIÓN healthy→changed,
+                        // no en cada tick mientras sigue "changed". El loop con FAST_POLL_INTERVAL_SECONDS=2s
+                        // hacía que este método se ejecute cada 2s y resetee estado_online constantemente,
+                        // generando falsas transiciones OFFLINE→ONLINE sin los ONLINE→OFFLINE
+                        // correspondientes (bug de flapping documentado en
+                        // vibe_engeneering_print_robustness.md §2.2).
+                        if (_previousHealthStatus != "changed")
+                        {
+                            HandleNetworkChanged(currentConfig, lastKnownGood);
+                            // Despertar al StatusMonitor para que re-evalúe cada impresora
+                            // individualmente con transiciones correctamente logueadas.
+                            if (_statusMonitor != null)
+                            {
+                                _statusMonitor.TriggerImmediateCheck("Red cambió — re-evaluar impresoras individualmente");
+                            }
+                        }
+                        else
+                        {
+                            Log.Debug("[NET-WATCHER] Red sigue en estado 'changed', esperando recuperación...");
+                        }
                     }
                     else if (healthStatus == "healthy")
                     {
@@ -240,16 +259,17 @@ namespace PrinterServices.Workers
                 Log.ErrorFormat("  Reconectar a WiFi: {0}", lastKnownGood.WifiSsid);
             }
 
-            // RAZÓN: Marcar TODAS las impresoras como potencialmente inalcanzables
-            try
-            {
-                _db.Execute("UPDATE printers SET estado_online = 0, disponible_para_imprimir = 0");
-                Log.Warn("[NET-WATCHER] Todas las impresoras marcadas como network_mismatch");
-            }
-            catch (Exception ex)
-            {
-                Log.Error("[NET-WATCHER] Error actualizando impresoras: " + ex.Message, ex);
-            }
+            // FIX: NO tocamos estado_online desde aquí.
+            // Antes: UPDATE printers SET estado_online=0, disponible_para_imprimir=0.
+            // Pero eso (a) pisaba en cada tick cuando la red seguía "changed", creando
+            // un loop de falsas transiciones OFFLINE→ONLINE sin sus contrapartes,
+            // y (b) viola el principio de que SÓLO el StatusMonitor gestiona el
+            // estado de conectividad individual de cada impresora (documentado en
+            // vibe_engeneering_print_robustness.md §2.2). El StatusMonitor acaba de
+            // ser despertado con TriggerImmediateCheck y va a re-evaluar cada impresora
+            // individualmente, logueando correctamente las transiciones que se
+            // detecten (si la impresora ya no responde por el cambio de red,
+            // el check normal la marcará offline + logueará ONLINE→OFFLINE).
 
             // TODO Fase 8B: Crear NetworkAlert en BD y notificar a QuipuNetX vía gRPC
             // RAZÓN: QuipuNetX debe mostrar alerta al usuario

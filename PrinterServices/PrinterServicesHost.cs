@@ -32,6 +32,8 @@ namespace PrinterServices
         private DbMaintenanceWorker _dbMaintenanceWorker; // Purga logs > 30 días cada hora
         private NetworkSpeedWorker _networkSpeedWorker;
         private NetworkDiscoveryWorker _networkDiscoveryWorker;
+        private Services.Printers.ProbeScheduler _probeScheduler; // Cola de probes de capacidades ESC/POS
+        private Services.Discovery.PrinterDiscoveryService _discoveryService; // Buscador multi-protocolo de impresoras
 
         public void Start()
         {
@@ -83,9 +85,27 @@ namespace PrinterServices
                 _printWorker.Start();
                 Log.Info("[WORKER] Worker de impresión iniciado (con instrumentación de latencias)");
 
-                // 5. Inicializar HTTP API
+                // 4.4. Inicializar ProbeScheduler (cola de probes de capacidades ESC/POS).
+                // Debe crearse ANTES del HTTP server porque el PrinterController lo recibe
+                // por constructor para exponer el endpoint manual y el trigger post-sync.
+                // La suscripción al evento JobEncolado del PrintJobManager se hace acá.
+                _probeScheduler = new Services.Printers.ProbeScheduler();
+                _probeScheduler.EscucharEventosDeJobs(_jobManager);
+                Log.Info("[HOST] ProbeScheduler inicializado y suscripto a JobEncolado");
+
+                // 4.5. Inicializar PrinterDiscoveryService (buscador multi-protocolo).
+                // Singleton en memoria. Expone sesiones de descubrimiento que corren en
+                // threads aparte (ThreadPool), NO afectan al StatusMonitor ni al PrintWorker.
+                // El user lo dispara desde el botón "Buscar impresoras" del dashboard.
+                _discoveryService = new Services.Discovery.PrinterDiscoveryService(_db);
+                Log.Info("[HOST] PrinterDiscoveryService inicializado");
+
+                // 5. Inicializar HTTP API (recibe ProbeScheduler + DbMaintenanceWorker + DiscoveryService
+                //    para que el dashboard exponga probe manual de capacidades, purga manual de BD,
+                //    y el buscador de impresoras en red).
                 int httpPort = _configManager.GetInt("HttpPort", 8090);
-                _httpApiServer = new HttpApiServer(httpPort, _db, _jobManager, _configManager);
+                _httpApiServer = new HttpApiServer(httpPort, _db, _jobManager, _configManager,
+                    _probeScheduler, _dbMaintenanceWorker, _discoveryService);
                 _httpApiServer.Start();
                 Log.InfoFormat("[HTTP] Servidor escuchando en puerto {0}", httpPort);
 
@@ -120,11 +140,11 @@ namespace PrinterServices
                 // 7.3. Instanciar servicio de sincronización de estado (SRP)
                 // RESPONSABILIDAD: Propagar estado entre impresoras del mismo dispositivo
                 var stateSync = new Services.Printers.PrinterStateSync(_db);
-                
+
                 // 7.4. Inicializar StatusMonitor con dependencias inyectadas (DIP)
                 // RAZÓN: Recibe todas las dependencias desde fuera, no las crea internamente
-                _statusMonitor = new StatusMonitor(_db, _jobManager, _arpWorker, 
-                    macEnricher, deviceGrouper, stateSync, jobStatusCallbackNotifier);
+                _statusMonitor = new StatusMonitor(_db, _jobManager, _arpWorker,
+                    macEnricher, deviceGrouper, stateSync, jobStatusCallbackNotifier, _probeScheduler);
                 _statusMonitor.Start();
 
                 // 7.5. Enlazar NetworkWatcher → StatusMonitor para trigger inmediato
